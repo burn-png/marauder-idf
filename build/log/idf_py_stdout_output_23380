@@ -1,0 +1,165 @@
+Command: C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe C:\esp\v6.1\esp-idf\tools/idf_monitor.py -p COM6 -b 115200 --toolchain-prefix xtensa-esp32-elf- --target esp32 --revision 0 C:\Users\almak\Documents\Codex\2026-11-05\new-chat\outputs\marauder-idf\build\dominion_idf_sdr.elf C:\Users\almak\Documents\Codex\2026-11-05\new-chat\outputs\marauder-idf\build\bootloader\bootloader.elf --force-color -m 'C:\Espressif\tools\python\v6.1\venv\Scripts\python.exe' 'C:\esp\v6.1\esp-idf\tools\idf.py' '-p' 'COM6'
+[0;32mI (13) boot: ESP-IDF v6.1 2nd stage bootloader[0m
+[0;32mI (13) boot: compile time Nov  7 2026 17:17:21[0m
+[0;32mI (13) boot: Multicore bootloader[0m
+[0;32mI (14) boot: chip revision: v3.1[0m
+[0;32mI (16) boot.esp32: SPI Speed      : 40MHz[0m
+[0;32mI (20) boot.esp32: SPI Mode       : DIO[0m
+[0;32mI (24) boot.esp32: SPI Flash Size : 8MB[0m
+[0;32mI (27) boot: Enabling RNG early entropy source...[0m
+[0;32mI (32) boot: Partition Table:[0m
+[0;32mI (34) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (41) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (47) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (54) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (60) boot: End of partition table[0m
+[0;32mI (63) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=283ach (164780) map[0m
+[0;32mI (130) esp_image: segment 1: paddr=000383d4 vaddr=3ffb0000 size=04f74h ( 20340) load[0m
+[0;32mI (138) esp_image: segment 2: paddr=0003d350 vaddr=40080000 size=02cc8h ( 11464) load[0m
+[0;32mI (143) esp_image: segment 3: paddr=00040020 vaddr=400d0020 size=aea34h (715316) map[0m
+[0;32mI (398) esp_image: segment 4: paddr=000eea5c vaddr=40082cc8 size=0f514h ( 62740) load[0m
+[0;32mI (424) esp_image: segment 5: paddr=000fdf78 vaddr=50000000 size=00028h (    40) load[0m
+[0;32mI (434) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (434) boot: Disabling RNG early entropy source...[0m
+[0;32mI (445) cpu_start: Multicore app[0m
+[0;32mI (453) cpu_start: GPIO 3 and 1 are used as console UART I/O pins[0m
+[0;32mI (453) cpu_start: Pro cpu start user code[0m
+[0;32mI (453) cpu_start: cpu freq: 240000000 Hz[0m
+[0;32mI (455) app_init: Application information:[0m
+[0;32mI (459) app_init: Project name:     dominion_idf_sdr[0m
+[0;32mI (464) app_init: App version:      1[0m
+[0;32mI (467) app_init: Compile time:     Nov  7 2026 20:35:13[0m
+[0;32mI (472) app_init: ELF file SHA256:  96cfafe06...[0m
+[0;32mI (476) app_init: ESP-IDF:          v6.1[0m
+[0;32mI (480) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (484) efuse_init: Max chip rev:     v3.99 [0m
+[0;32mI (488) efuse_init: Chip rev:         v3.1[0m
+[0;32mI (492) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (498) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM[0m
+[0;32mI (503) heap_init: At 3FFCF888 len 00010778 (65 KiB): DRAM[0m
+[0;32mI (508) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM[0m
+[0;32mI (514) heap_init: At 3FFE4350 len 00003CB0 (15 KiB): D/IRAM[0m
+[0;32mI (519) heap_init: At 3FFF8000 len 00008000 (32 KiB): D/IRAM[0m
+[0;32mI (524) heap_init: At 400921DC len 0000DE24 (55 KiB): IRAM[0m
+[0;32mI (531) spi_flash: detected chip: generic[0m
+[0;32mI (533) spi_flash: flash io: dio[0m
+[0;32mI (538) main_task: Started on CPU0[0m
+[0;32mI (540) main_task: Calling app_main()[0m
+[0;32mI (546) sdspi_transaction: cmd=52, R1 response: command not supported[0m
+[0;32mI (591) sdspi_transaction: cmd=5, R1 response: command not supported[0m
+[0;32mI (636) storage: SD card mounted at /sdcard (CS=4, SPI2, 4 MHz)[0m
+Name: SD32G
+Type: SDHC
+Speed: 4.00 MHz (limit: 4.00 MHz)
+Size: 30436MB
+CSD: ver=2, sector_size=512, capacity=62333952 read_bl_len=9
+SSR: bus_width=1
+[0;32mI (658) storage: SD filesystem root is readable (24 directory entries)[0m
+[0;33mW (779) spi_common: GPIO 17 is conflict with others and be overwritten[0m
+[0;32mI (1195) wifi:wifi driver task: 3ffd88a8, prio:23, stack:6656, core=0[0m
+[0;32mI (1214) wifi:wifi firmware version: e12a754[0m
+[0;32mI (1215) wifi:wifi certification version: v7.0[0m
+[0;32mI (1215) wifi:config NVS flash: enabled[0m
+[0;32mI (1215) wifi:config nano formatting: disabled[0m
+[0;32mI (1220) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (1225) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (1229) wifi:Init management short buffer num: 32[0m
+[0;32mI (1233) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (1237) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (1241) wifi:Init static rx buffer num: 10[0m
+[0;32mI (1245) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (1251) wifi_init: accept mbox: 6[0m
+[0;32mI (1252) wifi_init: tcpip mbox: 32[0m
+[0;32mI (1256) wifi_init: udp mbox: 6[0m
+[0;32mI (1258) wifi_init: tcp mbox: 6[0m
+[0;32mI (1261) wifi_init: tcp tx win: 5760[0m
+[0;32mI (1265) wifi_init: tcp rx win: 5760[0m
+[0;32mI (1268) wifi_init: tcp mss: 1440[0m
+[0;32mI (1271) phy_init: phy_version 4863,a3a4459,Oct 28 2025,14:30:06[0m
+[0;32mI (1341) wifi:mode : null[0m
+[0;32mI (1342) wifi:Set ps type: 0, coexist: 0[0m
+
+[0;32mI (1342) wifi:ic_enable_sniffer[0m
+[0;32mI (1414) main_task: Returned from app_main()[0m
+[0;32mI (13) boot: ESP-IDF v6.1 2nd stage bootloader[0m
+[0;32mI (13) boot: compile time Nov  7 2026 17:17:21[0m
+[0;32mI (13) boot: Multicore bootloader[0m
+[0;32mI (14) boot: chip revision: v3.1[0m
+[0;32mI (16) boot.esp32: SPI Speed      : 40MHz[0m
+[0;32mI (20) boot.esp32: SPI Mode       : DIO[0m
+[0;32mI (24) boot.esp32: SPI Flash Size : 8MB[0m
+[0;32mI (27) boot: Enabling RNG early entropy source...[0m
+[0;32mI (32) boot: Partition Table:[0m
+[0;32mI (34) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (41) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (47) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (54) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (60) boot: End of partition table[0m
+[0;32mI (63) esp_image: segment 0: paddr=00010020 vaddr=3f400020 size=283ach (164780) map[0m
+[0;32mI (130) esp_image: segment 1: paddr=000383d4 vaddr=3ffb0000 size=04f74h ( 20340) load[0m
+[0;32mI (138) esp_image: segment 2: paddr=0003d350 vaddr=40080000 size=02cc8h ( 11464) load[0m
+[0;32mI (143) esp_image: segment 3: paddr=00040020 vaddr=400d0020 size=aea34h (715316) map[0m
+[0;32mI (398) esp_image: segment 4: paddr=000eea5c vaddr=40082cc8 size=0f514h ( 62740) load[0m
+[0;32mI (424) esp_image: segment 5: paddr=000fdf78 vaddr=50000000 size=00028h (    40) load[0m
+[0;32mI (434) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (434) boot: Disabling RNG early entropy source...[0m
+[0;32mI (445) cpu_start: Multicore app[0m
+[0;32mI (453) cpu_start: GPIO 3 and 1 are used as console UART I/O pins[0m
+[0;32mI (453) cpu_start: Pro cpu start user code[0m
+[0;32mI (453) cpu_start: cpu freq: 240000000 Hz[0m
+[0;32mI (455) app_init: Application information:[0m
+[0;32mI (459) app_init: Project name:     dominion_idf_sdr[0m
+[0;32mI (464) app_init: App version:      1[0m
+[0;32mI (467) app_init: Compile time:     Nov  7 2026 20:35:13[0m
+[0;32mI (472) app_init: ELF file SHA256:  96cfafe06...[0m
+[0;32mI (476) app_init: ESP-IDF:          v6.1[0m
+[0;32mI (480) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (484) efuse_init: Max chip rev:     v3.99 [0m
+[0;32mI (488) efuse_init: Chip rev:         v3.1[0m
+[0;32mI (492) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (498) heap_init: At 3FFAE6E0 len 00001920 (6 KiB): DRAM[0m
+[0;32mI (503) heap_init: At 3FFCF888 len 00010778 (65 KiB): DRAM[0m
+[0;32mI (508) heap_init: At 3FFE0440 len 00003AE0 (14 KiB): D/IRAM[0m
+[0;32mI (514) heap_init: At 3FFE4350 len 00003CB0 (15 KiB): D/IRAM[0m
+[0;32mI (519) heap_init: At 3FFF8000 len 00008000 (32 KiB): D/IRAM[0m
+[0;32mI (524) heap_init: At 400921DC len 0000DE24 (55 KiB): IRAM[0m
+[0;32mI (531) spi_flash: detected chip: generic[0m
+[0;32mI (533) spi_flash: flash io: dio[0m
+[0;32mI (538) main_task: Started on CPU0[0m
+[0;32mI (540) main_task: Calling app_main()[0m
+[0;32mI (546) sdspi_transaction: cmd=52, R1 response: command not supported[0m
+[0;32mI (591) sdspi_transaction: cmd=5, R1 response: command not supported[0m
+[0;32mI (636) storage: SD card mounted at /sdcard (CS=4, SPI2, 4 MHz)[0m
+Name: SD32G
+Type: SDHC
+Speed: 4.00 MHz (limit: 4.00 MHz)
+Size: 30436MB
+CSD: ver=2, sector_size=512, capacity=62333952 read_bl_len=9
+SSR: bus_width=1
+[0;32mI (658) storage: SD filesystem root is readable (24 directory entries)[0m
+[0;33mW (779) spi_common: GPIO 17 is conflict with others and be overwritten[0m
+[0;32mI (1195) wifi:wifi driver task: 3ffd88a8, prio:23, stack:6656, core=0[0m
+[0;32mI (1214) wifi:wifi firmware version: e12a754[0m
+[0;32mI (1215) wifi:wifi certification version: v7.0[0m
+[0;32mI (1215) wifi:config NVS flash: enabled[0m
+[0;32mI (1215) wifi:config nano formatting: disabled[0m
+[0;32mI (1220) wifi:Init data frame dynamic rx buffer num: 32[0m
+[0;32mI (1225) wifi:Init static rx mgmt buffer num: 5[0m
+[0;32mI (1229) wifi:Init management short buffer num: 32[0m
+[0;32mI (1233) wifi:Init dynamic tx buffer num: 32[0m
+[0;32mI (1237) wifi:Init static rx buffer size: 1600[0m
+[0;32mI (1241) wifi:Init static rx buffer num: 10[0m
+[0;32mI (1245) wifi:Init dynamic rx buffer num: 32[0m
+[0;32mI (1251) wifi_init: accept mbox: 6[0m
+[0;32mI (1252) wifi_init: tcpip mbox: 32[0m
+[0;32mI (1256) wifi_init: udp mbox: 6[0m
+[0;32mI (1258) wifi_init: tcp mbox: 6[0m
+[0;32mI (1261) wifi_init: tcp tx win: 5760[0m
+[0;32mI (1265) wifi_init: tcp rx win: 5760[0m
+[0;32mI (1268) wifi_init: tcp mss: 1440[0m
+[0;32mI (1271) phy_init: phy_version 4863,a3a4459,Oct 28 2025,14:30:06[0m
+[0;32mI (1341) wifi:mode : null[0m
+[0;32mI (1342) wifi:Set ps type: 0, coexist: 0[0m
+
+[0;32mI (1342) wifi:ic_enable_sniffer[0m
+[0;32mI (1385) main_task: Returned from app_main()[0m

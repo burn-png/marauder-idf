@@ -1,0 +1,45 @@
+dependencies:
+  embedblocks/jpeg-roi-decoder:
+    component_hash: 852b7cc2001ef7bd14824d89431885730013fb4ce6842400671516656806d626
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.0.0'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 0.5.3
+  espressif/libpng:
+    component_hash: 9a576d8fbd0ddb29330e1f4c4fe82470b3e0e7eca71ea3bc4dce168d0b1088e3
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    - name: espressif/zlib
+      registry_url: https://components.espressif.com
+      require: private
+      version: ^1.2.13
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.6.59
+  espressif/zlib:
+    component_hash: 61b7c41a6c7091085555a3cef58722af4bd9078e8708ee00a0e78efb997daf7c
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.3.2~2
+  idf:
+    source:
+      type: idf
+    version: 6.1.0
+direct_dependencies:
+- embedblocks/jpeg-roi-decoder
+- espressif/libpng
+manifest_hash: f89a2f1e2978cdadaaf6cf6eef806ef36d796cd09a8c31495cd1d17c8ed4b996
+target: esp32
+version: 3.0.0
