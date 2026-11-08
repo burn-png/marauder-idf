@@ -17,7 +17,7 @@ This inventory follows the Mayhem application category index and the Receivers, 
 | RF Replay | Contiguous IQ source and supported transmitter hardware | Original ESP32 Marauder v7 has receive-only ESP-SDR path; no transmitter | Separate app browses captures and metadata, checks format/rate/frequency/continuity, reports RF TX unavailable, saves per-capture `.RRC` configuration with TX disabled | Architecture implemented; RF TX unavailable |
 | GPS | GPS UART, receiver and SD | UART2 MCU RX/TX GPIO21/22, 9600 baud; no controllable GPS power line | Dashboard, checksum-validated talker-independent RMC/GGA parsing, coordinate validation, stale-fix indication, NMEA/UART diagnostics, named track recording, pause/resume/stop, CSV browse/point review, named saved locations and delete; selectable coordinate format and units | Partial |
 | Remote | Compatible remote-control endpoint/protocol | No Mayhem remote link | No remote operation or placeholder menu page | Unavailable |
-| Looking Glass | Wideband receiver, tunable LO, display | Narrow RF snapshots only; upper tune requests unverified | Frequency-hop waterfall with adjustable MIN/MAX scan frequencies and wrap reset; quick controls for shared RX gain/AGC, display RANGE, and LOW/MID/MAX temporal averaging | Partial |
+| Looking Glass | Wideband receiver, tunable LO, display | Narrow RF snapshots only; upper tune requests unverified | Responsive default scan range; adjustable/lockable bounds; skip failed tunes; selectable hop/dwell, waterfall/live/peak views, pause, RX gain, display span, and smoothing filter | Partial |
 | Utilities | Display, controls, SD, peripherals | Varies by utility | See detailed utility rows | Partial |
 | Games | Display and controls | Five-way tactile joystick, no touch | No games are shipped in this firmware | Unavailable |
 | Settings | Persistent storage and controls | NVS and SD available | Persistent receiver/DSP settings and reset | Partial |
@@ -51,7 +51,7 @@ Selected receiver applications from the Mayhem catalog are listed below. Except 
 | FT8 RX | HF receiver, audio and FT8 decoder | Outside RF range and no audio path | No decoder | Unavailable |
 | gfxEQ | Audio path and display | No audio input pipeline | No audio spectrum view | Unavailable |
 | Level | Tunable RSSI receiver | Relative FFT-bin energy only | Receiver submenu; spectrum magnitude and peak view | Partial |
-| Looking Glass | Tunable wideband receiver | Narrow 2.4 GHz range | Hopped waterfall with adjustable frequency bounds, shared-gain, display-span, and averaging controls | Partial |
+| Looking Glass | Tunable wideband receiver | 2.4 GHz snapshots; broader tuning requests are unverified | Hopped waterfall with adjustable/lockable bounds, skip-on-error tuning, selectable hop/dwell and display modes, pause, shared gain, display span, and smoothing | Partial |
 | Meteor LRPT | 137 MHz receiver and image decoder | Outside RF range | No image decoder | Unavailable |
 | Morse RX | Narrowband audio/baseband decoder | No demodulated audio | No decoder | Unavailable |
 | NOAA | 137 MHz receiver and image decoder | Outside RF range | No image decoder | Unavailable |

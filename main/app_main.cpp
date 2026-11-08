@@ -47,8 +47,13 @@ std::atomic<bool> s_looking_glass_active{false};
 std::atomic<bool> s_foxhunt_active{false};
 std::atomic<bool> s_rssi_detector_active{false};
 std::atomic<uint32_t> s_rssi_detector_frequency{2412};
-std::atomic<uint32_t> s_glass_min_frequency{MARAUDER_RADIO_FREQ_MIN_MHZ};
-std::atomic<uint32_t> s_glass_max_frequency{MARAUDER_RADIO_FREQ_MAX_MHZ};
+std::atomic<uint32_t> s_glass_min_frequency{2412};
+std::atomic<uint32_t> s_glass_max_frequency{2484};
+std::atomic<uint32_t> s_glass_current_frequency{2412};
+std::atomic<uint8_t> s_glass_step_index{2};
+std::atomic<uint8_t> s_glass_dwell_index{2};
+std::atomic<uint8_t> s_glass_view_mode{0};
+std::atomic<bool> s_glass_paused{false};
 std::atomic<uint32_t> s_foxhunt_frequency{2412};
 std::atomic<uint8_t> s_spectrum_filter{0};
 std::atomic<bool> s_trace_autofit{true};
@@ -81,6 +86,8 @@ size_t s_media_files{};
 bool s_tx_armed{};
 size_t s_glass_setting{};
 bool s_glass_editing{};
+bool s_glass_range_locked{};
+uint8_t s_glass_peak_bins[240]{};
 size_t s_dsp_cursor{};
 size_t s_foxhunt_step_index{};
 uint8_t s_foxhunt_level{},s_foxhunt_peak_level{};
@@ -90,7 +97,7 @@ size_t s_rssi_history_count{},s_rssi_history_head{};
 uint8_t s_rssi_threshold{96},s_rssi_level{};
 bool s_rssi_triggered{},s_rssi_detector_enabled{true};
 struct GlassQuickCache { char text[24]; bool focused,editing,valid; };
-GlassQuickCache s_glass_quick_cache[5]{};
+GlassQuickCache s_glass_quick_cache[10]{};
 unsigned s_antenna_mode{};uint64_t s_stopwatch_elapsed_ms{},s_stopwatch_started_ms{};bool s_stopwatch_running{};char s_random_password[17]{};
 int64_t s_calc_lhs{},s_calc_rhs{};int s_calc_op=-1;unsigned s_calc_key{};bool s_calc_rhs_mode{},s_calc_error{};char s_calc_result[64]="0";
 int8_t s_iq[512];
@@ -177,7 +184,11 @@ void radio_task(void *) {
     marauder::SpectrumFrame frame{};
     uint8_t raw_bins[240], raw_peaks[240]{};
     static constexpr uint32_t channels[]={2412,2417,2422,2427,2432,2437,2442,2447,2452,2457,2462,2467,2472,2484};
-    uint32_t recon_index=0,glass_frequency=MARAUDER_RADIO_FREQ_MIN_MHZ,averaged_frequency=0;unsigned averaged_divisor=0,glass_dwell=0;bool averaged_hann=false;int64_t last_gps_log_us=0;
+    static constexpr uint32_t glass_steps[]={4,8,16,32};
+    static constexpr unsigned glass_dwells[]={1,2,4,8};
+    uint32_t recon_index=0,glass_frequency=s_glass_min_frequency.load(std::memory_order_relaxed),averaged_frequency=0;
+    unsigned averaged_divisor=0,glass_dwell=0,glass_step=glass_steps[2],glass_dwell_limit=glass_dwells[2];
+    bool averaged_hann=false;int64_t last_gps_log_us=0;
     bool glass_was_active=false;
     for (;;) {
         const auto cfg=settings_snapshot();
@@ -185,6 +196,10 @@ void radio_task(void *) {
         const int64_t started=esp_timer_get_time();
         uint32_t tuned=cfg.center_mhz;
         if (s_radio_paused.load(std::memory_order_relaxed)) {
+            vTaskDelay(pdMS_TO_TICKS(40));
+            continue;
+        }
+        if(s_looking_glass_active.load(std::memory_order_relaxed)&&s_glass_paused.load(std::memory_order_relaxed)){
             vTaskDelay(pdMS_TO_TICKS(40));
             continue;
         }
@@ -213,6 +228,13 @@ void radio_task(void *) {
                 const uint32_t glass_max=s_glass_max_frequency.load(std::memory_order_relaxed);
                 if(!glass_was_active){glass_frequency=glass_min;glass_dwell=0;glass_was_active=true;}
                 else glass_frequency=std::clamp(glass_frequency,glass_min,glass_max);
+                const uint8_t step_index=std::min<uint8_t>(s_glass_step_index.load(std::memory_order_relaxed),3);
+                const uint8_t dwell_index=std::min<uint8_t>(s_glass_dwell_index.load(std::memory_order_relaxed),3);
+                if(glass_step!=glass_steps[step_index]||glass_dwell_limit!=glass_dwells[dwell_index]){
+                    glass_step=glass_steps[step_index];
+                    glass_dwell_limit=glass_dwells[dwell_index];
+                    glass_dwell=0;
+                }
                 tuned=glass_frequency;
             }else if(s_rssi_detector_active.load(std::memory_order_relaxed)){glass_was_active=false;tuned=s_rssi_detector_frequency.load(std::memory_order_relaxed);}
             else glass_was_active=false;
@@ -221,10 +243,21 @@ void radio_task(void *) {
                 s_avg_initialized=false;memset(s_peak_bins,0,sizeof(s_peak_bins));
             }
             frame.center_mhz=tuned;
+            if(s_looking_glass_active.load(std::memory_order_relaxed))s_glass_current_frequency.store(tuned,std::memory_order_relaxed);
             const esp_err_t capture_error=marauder_radio_capture_iq8(tuned,256,s_iq);
             ok=capture_error==ESP_OK;
             s_last_radio_error.store(ok?0:capture_error,std::memory_order_relaxed);
             if(ok)s_radio_capture_successes.fetch_add(1,std::memory_order_relaxed);
+            if(s_looking_glass_active.load(std::memory_order_relaxed)&&
+               !s_glass_paused.load(std::memory_order_relaxed)&&++glass_dwell>=glass_dwell_limit){
+                const uint32_t glass_min=s_glass_min_frequency.load(std::memory_order_relaxed);
+                const uint32_t glass_max=s_glass_max_frequency.load(std::memory_order_relaxed);
+                if(glass_frequency>=glass_max)
+                    glass_frequency=glass_min;
+                else
+                    glass_frequency=std::min(glass_frequency+glass_step,glass_max);
+                glass_dwell=0;
+            }
             if (ok && s_capture_requested.load(std::memory_order_relaxed)) {
                 if (!s_capture_active.load(std::memory_order_relaxed))
                     s_capture_active.store(marauder::storage_capture_begin(frame.center_mhz),std::memory_order_relaxed);
@@ -275,15 +308,6 @@ void radio_task(void *) {
             memcpy(frame.peaks,s_peak_bins,sizeof(frame.peaks));
             xQueueOverwrite(s_frame_queue,&frame);
             s_frames.fetch_add(1,std::memory_order_relaxed);
-            if(s_looking_glass_active.load(std::memory_order_relaxed)&&++glass_dwell>=4){
-                const uint32_t glass_min=s_glass_min_frequency.load(std::memory_order_relaxed);
-                const uint32_t glass_max=s_glass_max_frequency.load(std::memory_order_relaxed);
-                if(glass_frequency>=glass_max)
-                    glass_frequency=glass_min;
-                else
-                    glass_frequency=std::min(glass_frequency+16,glass_max);
-                glass_dwell=0;
-            }
             if(s_recon_active.load(std::memory_order_relaxed)&&marauder::storage_ready()){
                 uint8_t level=0;for(unsigned i=0;i<240;++i)level=std::max(level,raw_bins[i]);
                 if(level>72){char record[80];int n=snprintf(record,sizeof(record),"%lu,%lu,%u\r\n",(unsigned long)(esp_timer_get_time()/1000),(unsigned long)tuned,level);marauder::storage_write_file("RECON.CSV",record,(size_t)n,true);}
@@ -734,7 +758,7 @@ void execute_detail_action(const Item *items,size_t count) {
             case 2:s_detail=Detail::GAIN;break;
             case 3:s_dsp_cursor=0;s_detail=Detail::DSP;break;
             case 4:s_foxhunt_frequency.store(settings_snapshot().center_mhz,std::memory_order_relaxed);s_foxhunt_level=s_foxhunt_peak_level=0;s_foxhunt_peak_offset_khz=0;s_foxhunt_step_index=0;s_recon_active.store(false);s_looking_glass_active.store(false);s_replay_active.store(false);s_radio_paused.store(false);s_foxhunt_active.store(true);s_detail=Detail::FOXHUNT;break;
-            case 5:s_glass_setting=0;s_glass_editing=false;for(auto &entry:s_glass_quick_cache)entry.valid=false;s_looking_glass_active.store(true);s_detail=Detail::SPECTRUM;break;
+            case 5:s_glass_setting=0;s_glass_editing=false;s_glass_paused.store(false,std::memory_order_relaxed);s_radio_paused.store(false,std::memory_order_relaxed);memset(s_glass_peak_bins,0,sizeof(s_glass_peak_bins));for(auto &entry:s_glass_quick_cache)entry.valid=false;s_looking_glass_active.store(true);s_detail=Detail::SPECTRUM;break;
             case 6:s_detail=Detail::SCANNER;break;
             case 7:{const auto c=settings_snapshot();s_rssi_detector_frequency.store(c.center_mhz,std::memory_order_relaxed);memset(s_rssi_history,0,sizeof(s_rssi_history));s_rssi_history_count=s_rssi_history_head=0;s_rssi_level=0;s_rssi_triggered=false;s_rssi_detector_enabled=true;s_rssi_detector_active.store(true,std::memory_order_relaxed);s_detail=Detail::RSSI_GRAPH;break;}
             default:s_page=Page::HOME;break;
@@ -748,7 +772,7 @@ void execute_detail_action(const Item *items,size_t count) {
     if(s_category==Category::RF_REPLAY){if(s_category_selected==0){s_rf_cursor=0;s_detail=Detail::RF_REPLAY;s_page=Page::DETAIL;}else if(s_category_selected==1){s_rf_config_cursor=0;s_detail=Detail::RF_CONFIGS;s_page=Page::DETAIL;}else s_page=Page::HOME;return;}
     if(s_category==Category::TX_TEST){if(s_category_selected==0){s_tx_armed=false;s_detail=Detail::TX_TEST;s_page=Page::DETAIL;}else s_page=Page::HOME;return;}
     if(s_category==Category::GPS){if(s_category_selected<3){if(s_category_selected>0&&!marauder::storage_accessible())marauder::storage_retry_mount();s_gps_view=s_category_selected;s_gps_cursor=0;s_detail=Detail::GPS;s_page=Page::DETAIL;}else s_page=Page::HOME;return;}
-    if(s_category==Category::LOOKING_GLASS){if(s_category_selected==0){s_glass_setting=0;s_glass_editing=false;for(auto &entry:s_glass_quick_cache)entry.valid=false;s_looking_glass_active.store(true);s_detail=Detail::SPECTRUM;s_page=Page::DETAIL;}else s_page=Page::HOME;return;}
+    if(s_category==Category::LOOKING_GLASS){if(s_category_selected==0){s_glass_setting=0;s_glass_editing=false;s_glass_paused.store(false,std::memory_order_relaxed);s_radio_paused.store(false,std::memory_order_relaxed);memset(s_glass_peak_bins,0,sizeof(s_glass_peak_bins));for(auto &entry:s_glass_quick_cache)entry.valid=false;s_looking_glass_active.store(true);s_detail=Detail::SPECTRUM;s_page=Page::DETAIL;}else s_page=Page::HOME;return;}
     if(s_category==Category::PROFILES){if(s_category_selected==0){s_detail=Detail::PROFILES;s_page=Page::DETAIL;}else s_page=Page::HOME;return;}
     if(s_category==Category::UTILITIES){static const Detail d[]={Detail::FILES,Detail::FREQ_MANAGER,Detail::IQ_TRIM,Detail::NOTEPAD,Detail::ANTENNA,Detail::CALCULATOR,Detail::STOPWATCH,Detail::RANDPWD,Detail::FLASH,Detail::DEBUG,Detail::STORAGE,Detail::DEVICE,Detail::MEDIA,Detail::NONE};s_detail=d[s_category_selected];if(s_detail==Detail::NOTEPAD)load_note();if(s_detail==Detail::ANTENNA)s_antenna_mode=0;if(s_detail==Detail::STOPWATCH){s_stopwatch_elapsed_ms=0;s_stopwatch_running=false;}if(s_detail==Detail::RANDPWD)make_password();if(s_detail==Detail::CALCULATOR){s_calc_lhs=s_calc_rhs=0;s_calc_op=-1;s_calc_key=0;s_calc_rhs_mode=s_calc_error=false;strcpy(s_calc_result,"0");}if(s_detail==Detail::MEDIA){s_media_cursor=0;s_media_opened=s_media_rendered=false;refresh_media_files();}if(s_detail==Detail::NONE)s_page=Page::HOME;else s_page=Page::DETAIL;return;}
     if(s_category==Category::EXTERNALS){if(s_category_selected==0){s_detail=Detail::EXTERNALS;s_page=Page::DETAIL;}else s_page=Page::HOME;return;}
@@ -810,6 +834,8 @@ void ui_task(void *) {
     size_t old_home=(size_t)-1,old_category_index=(size_t)-1;
     uint32_t shown_center_mhz=settings_snapshot().center_mhz;
     uint32_t previous_glass_center{};
+    uint32_t previous_glass_peak_center{};
+    uint8_t previous_glass_view=0xff;
     TickType_t last_refresh=0;
     for(;;){
         const auto event=marauder::input_next_event(input_config(settings_snapshot()));
@@ -916,23 +942,51 @@ void ui_task(void *) {
                 auto c=settings_snapshot();
                 const bool arrow=event.key==marauder::InputKey::UP||event.key==marauder::InputKey::DOWN||
                                  event.key==marauder::InputKey::LEFT||event.key==marauder::InputKey::RIGHT;
-                if(confirm)s_glass_editing=!s_glass_editing;
+                if(confirm&&s_glass_setting==8&&!s_glass_editing)s_glass_paused.store(!s_glass_paused.load(std::memory_order_relaxed),std::memory_order_relaxed);
+                else if(confirm&&s_glass_setting==9&&!s_glass_editing)s_glass_range_locked=!s_glass_range_locked;
+                else if(confirm)s_glass_editing=!s_glass_editing;
                 else if(arrow&&!s_glass_editing){
                     const bool previous=event.key==marauder::InputKey::UP||event.key==marauder::InputKey::LEFT;
-                    s_glass_setting=(s_glass_setting+(previous?4:1))%5;
+                    s_glass_setting=(s_glass_setting+(previous?9:1))%10;
                 }else if(arrow){
                     const int direction=event.key==marauder::InputKey::UP||event.key==marauder::InputKey::RIGHT?1:-1;
                     switch(s_glass_setting){
                         case 0:{
                             const int step=event.repeat_count>8?10:1;
-                            const int next=(int)s_glass_min_frequency.load(std::memory_order_relaxed)+direction*step;
-                            s_glass_min_frequency.store((uint32_t)std::clamp(next,(int)MARAUDER_RADIO_FREQ_MIN_MHZ,(int)s_glass_max_frequency.load(std::memory_order_relaxed)),std::memory_order_relaxed);
+                            const int old_min=(int)s_glass_min_frequency.load(std::memory_order_relaxed);
+                            const int old_max=(int)s_glass_max_frequency.load(std::memory_order_relaxed);
+                            const int width=old_max-old_min;
+                            const int upper=s_glass_range_locked?(int)MARAUDER_RADIO_FREQ_MAX_MHZ-width:old_max;
+                            const int next=std::clamp(old_min+direction*step,(int)MARAUDER_RADIO_FREQ_MIN_MHZ,upper);
+                            if(s_glass_range_locked){
+                                const uint32_t next_max=(uint32_t)(next+width);
+                                if(next>old_min){
+                                    s_glass_max_frequency.store(next_max,std::memory_order_relaxed);
+                                    s_glass_min_frequency.store((uint32_t)next,std::memory_order_relaxed);
+                                }else{
+                                    s_glass_min_frequency.store((uint32_t)next,std::memory_order_relaxed);
+                                    s_glass_max_frequency.store(next_max,std::memory_order_relaxed);
+                                }
+                            }else s_glass_min_frequency.store((uint32_t)next,std::memory_order_relaxed);
                             break;
                         }
                         case 1:{
                             const int step=event.repeat_count>8?10:1;
-                            const int next=(int)s_glass_max_frequency.load(std::memory_order_relaxed)+direction*step;
-                            s_glass_max_frequency.store((uint32_t)std::clamp(next,(int)s_glass_min_frequency.load(std::memory_order_relaxed),(int)MARAUDER_RADIO_FREQ_MAX_MHZ),std::memory_order_relaxed);
+                            const int old_min=(int)s_glass_min_frequency.load(std::memory_order_relaxed);
+                            const int old_max=(int)s_glass_max_frequency.load(std::memory_order_relaxed);
+                            const int width=old_max-old_min;
+                            const int lower=s_glass_range_locked?(int)MARAUDER_RADIO_FREQ_MIN_MHZ+width:old_min;
+                            const int next=std::clamp(old_max+direction*step,lower,(int)MARAUDER_RADIO_FREQ_MAX_MHZ);
+                            if(s_glass_range_locked){
+                                const uint32_t next_min=(uint32_t)(next-width);
+                                if(next>old_max){
+                                    s_glass_max_frequency.store((uint32_t)next,std::memory_order_relaxed);
+                                    s_glass_min_frequency.store(next_min,std::memory_order_relaxed);
+                                }else{
+                                    s_glass_min_frequency.store(next_min,std::memory_order_relaxed);
+                                    s_glass_max_frequency.store((uint32_t)next,std::memory_order_relaxed);
+                                }
+                            }else s_glass_max_frequency.store((uint32_t)next,std::memory_order_relaxed);
                             break;
                         }
                         case 2:{
@@ -949,10 +1003,28 @@ void ui_task(void *) {
                             c.span_mhz=spans[current];settings_commit(c,false);
                             break;
                         }
-                        case 4:
-                            c.averaging=c.averaging<=1?(direction>0?4:8):c.averaging<=4?(direction>0?8:1):(direction>0?1:4);
-                            settings_commit(c,false);
+                        case 4:{
+                            const uint8_t current=s_spectrum_filter.load(std::memory_order_relaxed);
+                            spectrum_filter_set((uint8_t)((current+kSpectrumFilterCount+direction)%kSpectrumFilterCount));
                             break;
+                        }
+                        case 5:{
+                            const uint8_t current=s_glass_step_index.load(std::memory_order_relaxed);
+                            s_glass_step_index.store((uint8_t)((current+(direction>0?1:3))%4),std::memory_order_relaxed);
+                            break;
+                        }
+                        case 6:{
+                            const uint8_t current=s_glass_dwell_index.load(std::memory_order_relaxed);
+                            s_glass_dwell_index.store((uint8_t)((current+(direction>0?1:3))%4),std::memory_order_relaxed);
+                            break;
+                        }
+                        case 7:{
+                            const uint8_t current=s_glass_view_mode.load(std::memory_order_relaxed);
+                            s_glass_view_mode.store((uint8_t)((current+(direction>0?1:2))%3),std::memory_order_relaxed);
+                            break;
+                        }
+                        case 8:s_glass_paused.store(!s_glass_paused.load(std::memory_order_relaxed),std::memory_order_relaxed);break;
+                        case 9:s_glass_range_locked=!s_glass_range_locked;break;
                         default:break;
                     }
                 }
@@ -1082,24 +1154,48 @@ void ui_task(void *) {
             marauder::SpectrumFrame frame{};
             const bool have_frame=s_frame_queue&&xQueueReceive(s_frame_queue,&frame,0)==pdTRUE;
             if(have_frame)shown_center_mhz=frame.center_mhz;
-            const uint32_t display_center=s_looking_glass_active.load(std::memory_order_relaxed)?shown_center_mhz:c.center_mhz;
+            const uint32_t display_center=s_looking_glass_active.load(std::memory_order_relaxed)?
+                (have_frame?shown_center_mhz:s_glass_current_frequency.load(std::memory_order_relaxed)):c.center_mhz;
             char title[40];snprintf(title,sizeof(title),"%lu.%03lu GHz Z%u %s%s",(unsigned long)(display_center/1000),(unsigned long)(display_center%1000),c.span_mhz,c.waterfall_palette==0?"MAGMA":c.waterfall_palette==1?"INFERNO":"GRAY",c.max_hold?" MH":"");draw_header(title,"",screen_changed,display_center>MARAUDER_RADIO_FREQ_BAND_MAX_MHZ?C_RED:C_CYAN);
             const int64_t center_khz=(int64_t)display_center*1000;
             const int64_t half_span_khz=(int64_t)c.span_mhz*500;
             const int64_t axis_khz[]={center_khz-half_span_khz,center_khz,center_khz+half_span_khz};
             const int axis_x[]={0,84,168};const char axis_tag[]={'L','C','R'};char axis[32];
-            for(unsigned a=0;a<3;++a){int64_t f=std::max<int64_t>(0,axis_khz[a]);snprintf(axis,sizeof(axis),"%c %lld.%03lldG",axis_tag[a],(long long)(f/1000000),(long long)((f/1000)%1000));marauder::display_text(axis_x[a],66,axis,C_AMBER,C_BLACK);}
+            if(!s_looking_glass_active.load(std::memory_order_relaxed))
+                for(unsigned a=0;a<3;++a){int64_t f=std::max<int64_t>(0,axis_khz[a]);snprintf(axis,sizeof(axis),"%c %lld.%03lldG",axis_tag[a],(long long)(f/1000000),(long long)((f/1000)%1000));marauder::display_text(axis_x[a],66,axis,C_AMBER,C_BLACK);}
+            const uint8_t glass_view=s_glass_view_mode.load(std::memory_order_relaxed);
+            if(s_looking_glass_active.load(std::memory_order_relaxed)&&glass_view!=previous_glass_view){
+                if(previous_glass_view!=0xff){
+                    marauder::display_fill_rect(0,36,240,30,C_BLACK);
+                    marauder::display_reset_waterfall();
+                    previous_glass_center=0;
+                }
+                for(auto &entry:s_glass_quick_cache)entry.valid=false;
+                previous_glass_view=glass_view;
+            }else if(!s_looking_glass_active.load(std::memory_order_relaxed)){
+                previous_glass_view=0xff;
+            }
             if(have_frame){
                 uint8_t display_bins[240],display_peaks[240],water_bins[240];uint16_t row[240];project_trace(frame,c,display_bins,display_peaks);project_waterfall(frame,c,water_bins);
                 for(unsigned i=0;i<240;++i)row[i]=marauder::waterfall_rgb565(water_bins[i],0,255,c.waterfall_palette);
                 if(s_looking_glass_active.load(std::memory_order_relaxed)){
-                    if(previous_glass_center&&frame.center_mhz<previous_glass_center)marauder::display_reset_waterfall();
+                    if(previous_glass_center&&frame.center_mhz<previous_glass_center){marauder::display_reset_waterfall();memset(s_glass_peak_bins,0,sizeof(s_glass_peak_bins));}
                     previous_glass_center=frame.center_mhz;
+                    if(glass_view==0)marauder::display_waterfall_line(row);
+                    else{
+                        if(previous_glass_peak_center!=frame.center_mhz)memset(s_glass_peak_bins,0,sizeof(s_glass_peak_bins));
+                        for(unsigned i=0;i<240;++i)s_glass_peak_bins[i]=std::max(s_glass_peak_bins[i],display_bins[i]);
+                        previous_glass_peak_center=frame.center_mhz;
+                        marauder::display_spectrum_region(glass_view==1?display_bins:s_glass_peak_bins,
+                                                          glass_view==1?display_peaks:s_glass_peak_bins,
+                                                          C_CYAN,80,100);
+                    }
                 }else{
                     previous_glass_center=0;
+                    previous_glass_peak_center=0;
                     marauder::display_spectrum(display_bins,display_peaks,C_CYAN);
+                    marauder::display_waterfall_line(row);
                 }
-                marauder::display_waterfall_line(row);
             }
             if(s_looking_glass_active.load(std::memory_order_relaxed)){
                 auto draw_quick=[&](int x,int y,const char *text,size_t index){
@@ -1110,34 +1206,37 @@ void ui_task(void *) {
                     cache.focused=focused;
                     cache.editing=s_glass_editing;
                     cache.valid=true;
-                    const int width=index==2?120:index==4?80:index<=1?80:64;
+                    const int width=110;
                     if(focused){
                         const uint16_t background=s_glass_editing?C_AMBER:C_WHITE;
-                        marauder::display_fill_rect(x-2,y-2,width+4,12,C_CYAN);
-                        marauder::display_fill_rect(x-1,y-1,width+2,10,background);
+                        marauder::display_fill_rect(x-2,y-1,width+4,9,C_CYAN);
+                        marauder::display_fill_rect(x-1,y,width+2,8,background);
                         marauder::display_text(x,y,text,C_BLACK,background);
                     }else{
-                        marauder::display_fill_rect(x-2,y-2,width+4,12,C_BLACK);
+                        marauder::display_fill_rect(x-2,y-1,width+4,9,C_BLACK);
                         marauder::display_text(x,y,text,C_WHITE,C_BLACK);
                     }
                 };
-                char value[16];
-                snprintf(value,sizeof(value),"MIN %4luM",(unsigned long)s_glass_min_frequency.load(std::memory_order_relaxed));
-                draw_quick(4,38,value,0);
-                snprintf(value,sizeof(value),"MAX %4luM",(unsigned long)s_glass_max_frequency.load(std::memory_order_relaxed));
-                draw_quick(104,38,value,1);
-                snprintf(value,sizeof(value),"LNA/VGA %s %3u",marauder_radio_rx_gain_is_auto()?"AGC":"MAN",marauder_radio_rx_gain_index());
-                draw_quick(4,48,value,2);
-                static const char *average_name[]={"LOW","MID","MAX"};
-                const unsigned filter_level=c.averaging<=1?0:c.averaging<=4?1:2;
-                snprintf(value,sizeof(value),"RANGE %2u",c.span_mhz);
-                draw_quick(4,58,value,3);
-                snprintf(value,sizeof(value),"AVG %s",average_name[filter_level]);
-                draw_quick(104,58,value,4);
+                char value[24];
+                const int y[]={36,44,52,60,68};
+                static constexpr uint32_t glass_steps[]={4,8,16,32};
+                static constexpr unsigned glass_dwells[]={1,2,4,8};
+                static const char *filter_name[]={"OFF","MEAN3","TRI5","MED3","MEAN5","MEAN7","TRI7","GAUSS5","MED5"};
+                static const char *view_name[]={"WATER","LIVE-V","PEAK-V"};
+                snprintf(value,sizeof(value),"MIN %lu",(unsigned long)s_glass_min_frequency.load(std::memory_order_relaxed));draw_quick(4,y[0],value,0);
+                snprintf(value,sizeof(value),"MAX %lu",(unsigned long)s_glass_max_frequency.load(std::memory_order_relaxed));draw_quick(124,y[0],value,1);
+                snprintf(value,sizeof(value),"RX %s %u",marauder_radio_rx_gain_is_auto()?"AGC":"MAN",marauder_radio_rx_gain_index());draw_quick(4,y[1],value,2);
+                snprintf(value,sizeof(value),"RANGE %uM",c.span_mhz);draw_quick(124,y[1],value,3);
+                snprintf(value,sizeof(value),"FILTER %s",filter_name[s_spectrum_filter.load(std::memory_order_relaxed)<kSpectrumFilterCount?s_spectrum_filter.load(std::memory_order_relaxed):0]);draw_quick(4,y[2],value,4);
+                snprintf(value,sizeof(value),"STEP %luM",(unsigned long)glass_steps[std::min<uint8_t>(s_glass_step_index.load(std::memory_order_relaxed),3)]);draw_quick(124,y[2],value,5);
+                snprintf(value,sizeof(value),"DWELL %u",glass_dwells[std::min<uint8_t>(s_glass_dwell_index.load(std::memory_order_relaxed),3)]);draw_quick(4,y[3],value,6);
+                snprintf(value,sizeof(value),"VIEW %s",view_name[std::min<uint8_t>(glass_view,2)]);draw_quick(124,y[3],value,7);
+                snprintf(value,sizeof(value),"%s",s_glass_paused.load(std::memory_order_relaxed)?"SWEEP PAUSED":"SWEEP RUN");draw_quick(4,y[4],value,8);
+                snprintf(value,sizeof(value),"RANGE LOCK %s",s_glass_range_locked?"ON":"OFF");draw_quick(124,y[4],value,9);
             }else{
                 previous_glass_center=0;
             }
-            s_radio_paused.store(c.paused,std::memory_order_relaxed);
+            if(!s_looking_glass_active.load(std::memory_order_relaxed))s_radio_paused.store(c.paused,std::memory_order_relaxed);
         } else if(s_detail==Detail::REPLAY){
             auto c=settings_snapshot();char name[64],title[32],footer[31];copy_replay_name(name);
             if(screen_changed){marauder::display_clear(C_BLACK);s_header_force=true;s_footer_force=true;s_footer_valid=false;marauder::display_reset_waterfall();}

@@ -14,4 +14,6 @@ void display_rgb565_image(int x,int y,int width,int height,const uint16_t *pixel
 void display_waterfall_line(const uint16_t *colors);
 void display_reset_waterfall();
 void display_spectrum(const uint8_t *bins, const uint8_t *peaks, uint16_t color);
+void display_spectrum_region(const uint8_t *bins, const uint8_t *peaks, uint16_t color,
+                             int top, int height);
 }

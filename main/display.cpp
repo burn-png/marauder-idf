@@ -228,24 +228,31 @@ void display_reset_waterfall() {
 }
 
 void display_spectrum(const uint8_t *bins, const uint8_t *peaks, uint16_t color) {
+    display_spectrum_region(bins, peaks, color, 36, 28);
+}
+
+void display_spectrum_region(const uint8_t *bins, const uint8_t *peaks, uint16_t color,
+                             int top, int height) {
+    if (height < 2) return;
     spi_gate_lock();
     uint16_t row[240];
     int trace_y[240], peak_y[240];
+    const int plot_height = height - 4;
     for (int x = 0; x < 240; ++x) {
-        trace_y[x] = 27 - (bins[x] * 24) / 255;
-        peak_y[x] = 27 - (peaks[x] * 24) / 255;
+        trace_y[x] = height - 1 - (bins[x] * plot_height) / 255;
+        peak_y[x] = height - 1 - (peaks[x] * plot_height) / 255;
     }
-    for (int y = 0; y < 28; ++y) {
+    for (int y = 0; y < height; ++y) {
         for (int x = 0; x < 240; ++x) {
             const int above = x > 0 ? x - 1 : x;
             const bool has_signal = bins[above] || bins[x];
             const bool trace = has_signal &&
                                y >= std::min(trace_y[above], trace_y[x]) - 1 &&
                                y <= std::max(trace_y[above], trace_y[x]);
-            const bool peak = peaks[x] && y == peak_y[x];
+            const bool peak = peaks[x] > bins[x] && y == peak_y[x];
             row[x] = trace ? color : peak ? 0xf800 : 0x0000;
         }
-        push_scanline(36 + y, row);
+        push_scanline(top + y, row);
     }
     spi_gate_unlock();
 }
