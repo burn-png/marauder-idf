@@ -1,0 +1,21 @@
+
+# ESP-IDF generated build files
+build/
+managed_components/
+
+# Generated configuration
+build/
+managed_components/
+sdkconfig
+git status
+sdkconfig.old
+.vscode/
+__pycache__/
+*.pyc
+
+# Python generated files
+__pycache__/
+*.pyc
+
+# VS Code local settings
+.vscode/
