@@ -1,5 +1,7 @@
 # Mayhem feature inventory and Dominion compatibility with Marauder V7 hardware
 
+> Target hardware: **Marauder V7.2** (battery-polarity revision). No V7.2 GPIO change is assumed; the MAX17048 SCL pin (16 or 27) is auto-detected and shown on Device Info.
+
 This inventory follows the Mayhem application category index and the Receivers, Transmitters, Transceivers, Utilities, Games, and Settings wiki pages reviewed on 2026-11-05. A status describes this project, not the status of Mayhem itself.
 
 **Status key:** **Complete** = implemented in this project for the stated hardware scope; **Partial** = a narrower equivalent exists; **Unavailable** = hardware, architecture, or safety policy prevents it. “Unavailable” rows remain listed so unsupported capabilities are explicit. TX entries are deliberately disabled; passive/offline tools do not imply permission to transmit.
@@ -22,7 +24,7 @@ This inventory follows the Mayhem application category index and the Receivers, 
 | Games | Display and controls | Five-way tactile joystick, no touch | No games are shipped in this firmware | Unavailable |
 | Settings | Persistent storage and controls | NVS and SD available | Persistent receiver/DSP settings and reset | Partial |
 | HackRF | HackRF hardware/control protocol | Not a HackRF/PortaPack | No HackRF operation or placeholder menu page | Unavailable |
-| External apps | Versioned app ABI/runtime | No executable loader | `.APP` text manifest discovery only; seeds an explicitly metadata-only Analog TV demo on mounted SD | Partial |
+| External apps | Versioned app ABI/runtime | Sandboxed bytecode VM (VM1), no native code loading | `.APP` manifests listed; apps with `RUNTIME=VM1` + `CODE=` run (draw/joystick/timing only); example Snake; Analog TV demo stays metadata-only | Partial (host-tested; untested on hardware) |
 | Menu organization, selection, scrolling, back navigation | Display and controls | Five-way tactile joystick | Receiver menu groups live spectrum, signal meter, Looking Glass, passive scan, and Rolling RSSI Detector; shared 10 ms input scan, 12 ms default debounce, immediate press event, configurable hold-repeat; dirty-row/text rendering; direct Settings entry with Back first | Partial |
 | Status bar | Heap, SD, optional battery gauge, GPS | Internal heap and SD status available; optional MAX17048 on GPIO33/16; no documented battery ADC or charging-state signal | Changed-value-only app/heap/SD/battery/gps status; SD reads exactly `SD: OK` or `SD: NG`; battery unknown without gauge | Partial |
 | Search across applications | Text input/query controls | No text keyboard | No general text search | Unavailable |
@@ -151,7 +153,11 @@ Mayhem transmitter applications are listed individually below. The original ESP3
 | Flash Utility | Bootloader and image validation | On-device instructions point to ESP-IDF flashing in VS Code; no SD-image flasher | Partial |
 | Frequency Manager | Frequency lists and editor | Cyclic 5 MHz tune step within supported band; no saved named list | Partial |
 | IQ Trim | IQ file reader/writer | Finds quiet IQ8 blocks and writes a separate trimmed copy | Complete |
-| SD Media Viewer | Display, joystick and SD | Searches root and nested folders for supported media; decodes baseline JPEG and non-interlaced PNG images on a larger-stack task, fitting supported images into the display area; recognizes MP4 but has no compatible video decoder | Partial |
+| SD file browser (media viewer + file manager) | Display, joystick and SD | Multi-row folder browser with bounded-RAM paging; JPEG (baseline, any size up to 3840 px wide via 1/8 decode and sampling) and non-interlaced PNG viewing with previous/next; text preview; info; guarded delete; MP4 recognised but no decoder | Partial (host-tested model; image path compile-checked, untested on hardware) |
+| Offline OSM map | SD, display, GPS | Streaming indexer and band renderer, pan/zoom/follow, trace, HUD; no relations/multipolygons | Partial (host-tested; untested on hardware) |
+| Nav / speedometer | GPS | Speed, heading estimate, accuracy, trip; source of each value shown | Implemented (host-tested; untested with a live receiver) |
+| Remote ID (passive) | Wi-Fi promiscuous | Marauder decoder; Wi-Fi beacon + NAN; BLE legacy only with BT controller enabled | Partial (decoder host-tested; on-air reception untested) |
+| RF delay-to-distance | None on this board | Maths + CSV import only; no on-device measurement | Interface only (hardware unsupported) |
 | Metronome | Audio output | No audio output | Unavailable |
 | Notepad | SD and text-entry interface | Append-only A–Z/space/backspace editor to `NOTES.TXT` | Partial |
 | Playlist Editor | SD and replay playlist runtime | No playlists supported | Unavailable |
@@ -191,7 +197,7 @@ Mayhem games include RF-dependent Battleship; those radio interactions are not i
 | AppManager, hide/autostart, blacklist | No app runtime/launcher | Unavailable |
 | Per-app SD settings | A single NVS settings record is used | Partial |
 | Audio and CTCSS | No audio/TX pipeline | Unavailable |
-| Battery/charge display | No battery fuel-gauge interface implemented | Unavailable |
+| Battery/charge display | Optional MAX17048 on GPIO33/16; charging status is not exposed | Reads SOC every three seconds; shows unknown if gauge is absent |
 | Joystick repeat/debounce/long press/inversion | Marauder v7 five-way switches | Shared input manager; repeat delay/rate, debounce, long press, acceleration, horizontal/vertical inversion in NVS | Partial |
 | Touch calibration / touchscreen | Upstream v7 setup has touch CS disabled | Unavailable |
 | Config mode | Not applicable to this application | Unavailable |
@@ -221,6 +227,13 @@ Mayhem games include RF-dependent Battleship; those radio interactions are not i
 | Waterfall history depth/speed/clear | Fixed display scroll area and frame cadence | Partial |
 | GPS position/fix/time/quality | Checksummed RMC/GGA, truthful stale/no-fix state, reported altitude/speed/course/quality/satellites/HDOP, UTC and parse/UART counters | Partial |
 | GPS named tracks and saved locations | SD CSV logging, viewer, selection and deletion | Versioned `GPS/TRACKS/*.CSV`, timed point append, pause/resume/stop, point-by-point review, named `GPS/LOCATIONS.CSV` entries and deletion; viewer reports point count, endpoints, elapsed UTC time and straight-line endpoint distance | Partial |
+| FFT window selection | Rect/Hann | RECT, HANN, HAMMING, BLACKMAN, BLK-HARRIS, FLAT-TOP, BARTLETT, TRIANGULAR (+LEGACY); Q15 table, coherent-gain corrected, persistent | Partial |
+| Spectral filters | None | Low/high/band-pass and band-stop masks, 3 notches, DC-bin suppression, adjacent-bin rejection on the processed spectrum (IQ captures untouched) | Partial |
+| Noise reduction | Bin smoothing + averaging | Tracked noise floor + subtraction, EMA, adaptive EMA, median-3/5, impulse/transient/outlier rejection, narrowband guard | Partial |
+| Signal detection | Rolling RSSI detector | CA/GO/OS-CFAR, prominence, half-prominence width, sub-bin position tracking, relative SNR, persistence; relative FFT levels, not dBm | Partial |
+| Display processing | Auto-fit trace, peak hold | Independent trace/waterfall smoothing, peak decay, min hold, floor line, floor-anchored range modes, waterfall suppression/interpolation/contrast | Partial |
+| IQ pre-processing | None | Per-snapshot DC/gain/quadrature estimate and optional correction, normalisation; no continuous-stream claims | Partial |
+| DSP self-measurement | None | On-device PERFORMANCE page (stage microseconds, stack, heap, CPU) | Partial |
 | External application ABI launch | No safely supported loadable-app ABI | Discovery only; launch unavailable |
 
 ## References

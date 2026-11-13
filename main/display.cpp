@@ -154,6 +154,7 @@ void display_clear(uint16_t color) {
 
 void display_fill_rect(int x, int y, int width, int height, uint16_t color) {
     if (width <= 0 || height <= 0 || x < 0 || y < 0 || x + width > 240 || y + height > 320) return;
+    invalidate_text(x, y, width, height);   // cached text under the rectangle is no longer on screen
     spi_gate_lock();
     fill_rect(x, y, x + width - 1, y + height - 1, color);
     spi_gate_unlock();
@@ -232,15 +233,17 @@ void display_spectrum(const uint8_t *bins, const uint8_t *peaks, uint16_t color)
 }
 
 void display_spectrum_region(const uint8_t *bins, const uint8_t *peaks, uint16_t color,
-                             int top, int height) {
+                             int top, int height, const uint8_t *floor_marks, const uint8_t *min_marks) {
     if (height < 2) return;
     spi_gate_lock();
     uint16_t row[240];
-    int trace_y[240], peak_y[240];
+    int trace_y[240], peak_y[240], floor_y[240], min_y[240];
     const int plot_height = height - 4;
     for (int x = 0; x < 240; ++x) {
         trace_y[x] = height - 1 - (bins[x] * plot_height) / 255;
         peak_y[x] = height - 1 - (peaks[x] * plot_height) / 255;
+        floor_y[x] = floor_marks ? height - 1 - (floor_marks[x] * plot_height) / 255 : -1;
+        min_y[x] = min_marks ? height - 1 - (min_marks[x] * plot_height) / 255 : -1;
     }
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < 240; ++x) {
@@ -250,7 +253,7 @@ void display_spectrum_region(const uint8_t *bins, const uint8_t *peaks, uint16_t
                                y >= std::min(trace_y[above], trace_y[x]) - 1 &&
                                y <= std::max(trace_y[above], trace_y[x]);
             const bool peak = peaks[x] > bins[x] && y == peak_y[x];
-            row[x] = trace ? color : peak ? 0xf800 : 0x0000;
+            row[x] = trace ? color : peak ? 0xf800 : (min_y[x] == y) ? 0x07e0 : (floor_y[x] == y && (x & 1) == 0) ? 0xfd20 : 0x0000;
         }
         push_scanline(top + y, row);
     }

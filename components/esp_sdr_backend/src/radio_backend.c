@@ -1,3 +1,4 @@
+#include "esp_log.h"
 /*
  * Receive-only adapter based on ESPARGOS/esp-sdr's original ESP32 backend.
  * Register sequence and SRAM reservation remain under the upstream GPL-3.0-or-later.
@@ -128,6 +129,123 @@ esp_err_t marauder_radio_bench_tx_once(void) {
     return ESP_OK;
 }
 
+/* ---- Passive Wi-Fi monitor session (receive only) -------------------------
+ * Used by the Remote ID scanner. The caller keeps the SDR task paused; while a
+ * session is open capture_iq8() refuses, and ending it restores the SDR tune. */
+static bool s_tx_session;   /* CW transmit session open (defined here because the monitor code checks it) */
+static bool s_monitor;
+
+esp_err_t marauder_radio_monitor_begin(marauder_promisc_cb_t cb, uint8_t channel) {
+    if (!cb || channel < 1 || channel > 14) return ESP_ERR_INVALID_ARG;
+    if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    if (s_monitor || s_tx_session) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI("radio_mon", "monitor begin ch %u", channel);
+    wifi_promiscuous_filter_t filter = { .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT };
+    esp_err_t e = esp_wifi_set_promiscuous_filter(&filter);
+    if (e == ESP_OK) e = esp_wifi_set_promiscuous_rx_cb(cb);
+    if (e == ESP_OK) {
+        (void)rx_lo_select(false);              /* default LO plan: the normal Wi-Fi front-end configuration */
+        e = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    }
+    if (e == ESP_OK) s_monitor = true;
+    else (void)esp_wifi_set_promiscuous_rx_cb(NULL);
+    xSemaphoreGive(s_radio_mutex);
+    return e;
+}
+
+esp_err_t marauder_radio_monitor_channel(uint8_t channel) {
+    if (channel < 1 || channel > 14) return ESP_ERR_INVALID_ARG;
+    if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    esp_err_t e = s_monitor ? esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE) : ESP_ERR_INVALID_STATE;
+    xSemaphoreGive(s_radio_mutex);
+    return e;
+}
+
+esp_err_t marauder_radio_monitor_end(void) {
+    if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    if (!s_monitor) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_OK;
+    }
+    ESP_LOGI("radio_mon", "monitor end");
+    (void)esp_wifi_set_promiscuous_rx_cb(NULL);
+    (void)esp_wifi_set_channel(1, WIFI_SECOND_CHAN_NONE);
+    s_monitor = false;
+    s_rx_ready = false;                         /* force a full SDR retune + recalibration */
+    prepare_rx();
+    xSemaphoreGive(s_radio_mutex);
+    return ESP_OK;
+}
+
+bool marauder_radio_monitor_active(void) { return s_monitor; }
+
+/* ---- CW transmit session (PHY test mode) -------------------------------- */
+static int s_tx_chan = 1;
+static unsigned s_tx_backoff = 127;
+static bool s_tx_on;
+
+bool marauder_radio_tx_cw_active(void) { return s_tx_session; }
+
+esp_err_t marauder_radio_tx_cw_begin(void) {
+    if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    if (s_tx_session) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    ESP_LOGI("radio_tx", "CW session begin");
+    esp_phy_rftest_config(1);
+    esp_phy_rftest_init();
+    esp_phy_test_start_stop(3);
+    s_tx_session = true;
+    s_tx_on = false;
+    xSemaphoreGive(s_radio_mutex);
+    return ESP_OK;
+}
+
+esp_err_t marauder_radio_tx_cw_set(bool on, int wifi_channel, unsigned backoff_quarter_db) {
+    if (wifi_channel < -127 || wifi_channel > 127 || backoff_quarter_db > 127) return ESP_ERR_INVALID_ARG;
+    if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    if (!s_tx_session) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_tx_on) esp_phy_wifi_tx_tone(0, (uint32_t)s_tx_chan, s_tx_backoff); /* never retune a running tone */
+    s_tx_chan = wifi_channel;
+    s_tx_backoff = backoff_quarter_db;
+    ESP_LOGI("radio_tx", "tone %s ch %d backoff %u", on ? "on" : "off", wifi_channel, backoff_quarter_db);
+    if (on) esp_phy_wifi_tx_tone(1, (uint32_t)wifi_channel, backoff_quarter_db);
+    s_tx_on = on;
+    xSemaphoreGive(s_radio_mutex);
+    return ESP_OK;
+}
+
+esp_err_t marauder_radio_tx_cw_end(void) {
+    if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    if (!s_tx_session) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_OK;
+    }
+    ESP_LOGI("radio_tx", "CW session end");
+    if (s_tx_on) esp_phy_wifi_tx_tone(0, (uint32_t)s_tx_chan, s_tx_backoff);
+    s_tx_on = false;
+    esp_phy_test_start_stop(0);
+    esp_phy_rftest_config(0);
+    s_tx_session = false;
+    s_rx_ready = false;
+    prepare_rx();
+    xSemaphoreGive(s_radio_mutex);
+    return ESP_OK;
+}
+
 static void tune_rx(unsigned mhz) {
     static unsigned calibrated_mhz;
     if (calibrated_mhz != mhz || rx_recalibration_stale()) {
@@ -239,6 +357,10 @@ esp_err_t marauder_radio_capture_iq8(uint32_t center_mhz, size_t count, int8_t *
         center_mhz > MARAUDER_RADIO_FREQ_MAX_MHZ) return ESP_ERR_NOT_SUPPORTED;
     if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
         return ESP_ERR_TIMEOUT;
+    if (s_tx_session || s_monitor) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
     bool changed = center_mhz != s_frequency_mhz;
     s_frequency_mhz = center_mhz;
     if (changed) {

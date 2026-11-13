@@ -14,6 +14,7 @@ void display_rgb565_image(int x,int y,int width,int height,const uint16_t *pixel
 void display_waterfall_line(const uint16_t *colors);
 void display_reset_waterfall();
 void display_spectrum(const uint8_t *bins, const uint8_t *peaks, uint16_t color);
+// floor_marks (amber dots) and min_marks (green line) are optional overlays in the same 0..255 units as bins.
 void display_spectrum_region(const uint8_t *bins, const uint8_t *peaks, uint16_t color,
-                             int top, int height);
+                             int top, int height, const uint8_t *floor_marks = nullptr, const uint8_t *min_marks = nullptr);
 }

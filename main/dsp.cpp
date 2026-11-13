@@ -1,3 +1,4 @@
+#include <cstddef>
 #include "include/dsp.hpp"
 #include <array>
 
@@ -289,33 +290,8 @@ constexpr auto kGray = make_palette(kGrayStops);
 struct Complex { int32_t re, im; };
 }
 
-namespace marauder {
-uint16_t waterfall_rgb565(uint8_t level, uint8_t floor, uint8_t ceiling, uint8_t palette) {
-    if (ceiling <= floor) ceiling = (uint8_t)(floor + 1);
-    unsigned v = level <= floor ? 0 : level >= ceiling ? 255 :
-        ((unsigned)(level - floor) * 255u) / (ceiling - floor);
-    switch (palette) {
-        case 1: return kInferno[v];
-        case 2: return kGray[v];
-        default: return kMagma[v];
-    }
-}
-uint16_t heatmap_rgb565(uint8_t level) { return waterfall_rgb565(level, 20, 220, 0); }
-
-void fft256_fixed_windowed(const int8_t *iq, uint8_t bins[240], uint8_t peaks[240], bool hann_window) {
-    Complex a[256];
-    for (unsigned n = 0; n < 256; ++n) {
-        unsigned r = 0, x = n;
-        for (unsigned b = 0; b < 4; ++b) { r = (r << 2) | (x & 3u); x >>= 2; }
-        int32_t re = (int32_t)iq[2 * n] * 128;
-        int32_t im = (int32_t)iq[2 * n + 1] * 128;
-        if (hann_window) {
-            const int32_t weight = (32767 - kTwiddle[n].re) / 2;
-            re = (re * weight) >> 15;
-            im = (im * weight) >> 15;
-        }
-        a[r] = {re, im};
-    }
+namespace {
+void fft_core(Complex a[256]) {
     // Four radix-4 stages for 256 points. Scale by 1/4 at each stage to
     // maintain headroom; all multiply and butterfly math is integer-only.
     for (unsigned len = 4; len <= 256; len *= 4) {
@@ -347,6 +323,37 @@ void fft256_fixed_windowed(const int8_t *iq, uint8_t bins[240], uint8_t peaks[24
             }
         }
     }
+}
+}
+
+namespace marauder {
+uint16_t waterfall_rgb565(uint8_t level, uint8_t floor, uint8_t ceiling, uint8_t palette) {
+    if (ceiling <= floor) ceiling = (uint8_t)(floor + 1);
+    unsigned v = level <= floor ? 0 : level >= ceiling ? 255 :
+        ((unsigned)(level - floor) * 255u) / (ceiling - floor);
+    switch (palette) {
+        case 1: return kInferno[v];
+        case 2: return kGray[v];
+        default: return kMagma[v];
+    }
+}
+uint16_t heatmap_rgb565(uint8_t level) { return waterfall_rgb565(level, 20, 220, 0); }
+
+void fft256_fixed_windowed(const int8_t *iq, uint8_t bins[240], uint8_t peaks[240], bool hann_window) {
+    Complex a[256];
+    for (unsigned n = 0; n < 256; ++n) {
+        unsigned r = 0, x = n;
+        for (unsigned b = 0; b < 4; ++b) { r = (r << 2) | (x & 3u); x >>= 2; }
+        int32_t re = (int32_t)iq[2 * n] * 128;
+        int32_t im = (int32_t)iq[2 * n + 1] * 128;
+        if (hann_window) {
+            const int32_t weight = (32767 - kTwiddle[n].re) / 2;
+            re = (re * weight) >> 15;
+            im = (im * weight) >> 15;
+        }
+        a[r] = {re, im};
+    }
+    fft_core(a);
     for (unsigned x = 0; x < 240; ++x) {
         // The 240-bin output drops eight bins at each edge, keeping DC at
         // index 120 (the center of the cropped spectrum and waterfall).
@@ -356,6 +363,34 @@ void fft256_fixed_windowed(const int8_t *iq, uint8_t bins[240], uint8_t peaks[24
         // The radix-4 stages normalize the FFT. Preserve the resulting bin
         // magnitude; shifting it down pushed most bins below the UI floor.
         uint32_t mag = re + im;
+        if (mag > 255) mag = 255;
+        bins[x] = (uint8_t)mag;
+        if (bins[x] >= peaks[x]) peaks[x] = bins[x];
+        else if (peaks[x]) --peaks[x];
+    }
+}
+void fft256_fixed_custom(const int8_t *iq, uint8_t bins[240], uint8_t peaks[240], const FftParams &p) {
+    Complex a[256];
+    for (unsigned n = 0; n < 256; ++n) {
+        unsigned r = 0, x = n;
+        for (unsigned b = 0; b < 4; ++b) { r = (r << 2) | (x & 3u); x >>= 2; }
+        int32_t i = (int32_t)iq[2 * n] - p.dc_i;
+        int32_t q = (int32_t)iq[2 * n + 1] - p.dc_q;
+        if (p.balance) q = (((q - ((p.kc_q10 * i) >> 10))) * (int32_t)p.g_q8) >> 8;
+        int32_t re = i * 128, im = q * 128;
+        if (p.window_q15) {
+            const int32_t w = p.window_q15[n];
+            re = (re * w) >> 15;
+            im = (im * w) >> 15;
+        }
+        a[r] = {re, im};
+    }
+    fft_core(a);
+    for (unsigned x = 0; x < 240; ++x) {
+        const unsigned i = (x + 136) & 255u;
+        const uint32_t re = (uint32_t)(a[i].re < 0 ? -a[i].re : a[i].re);
+        const uint32_t im = (uint32_t)(a[i].im < 0 ? -a[i].im : a[i].im);
+        uint32_t mag = (((re + im) * (uint32_t)p.out_gain_q8) >> 8) << p.out_shift;
         if (mag > 255) mag = 255;
         bins[x] = (uint8_t)mag;
         if (bins[x] >= peaks[x]) peaks[x] = bins[x];

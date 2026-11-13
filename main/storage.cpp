@@ -2,6 +2,7 @@
 #include "include/pins.hpp"
 #include "include/spi_gate.hpp"
 #include "include/gps.hpp"
+#include "include/dir_window.hpp"
 #include "driver/spi_master.h"
 #include "driver/sdspi_host.h"
 #include "esp_vfs_fat.h"
@@ -40,8 +41,9 @@ bool make_path(const char *relative, char out[96]) {
     if (!relative || !relative[0] || strlen(relative) > 78 || relative[0] == '/' || strstr(relative, "..")) return false;
     if (strcmp(relative, ".") == 0) return snprintf(out, 96, "/sdcard") < 96;
     for (const unsigned char *p = (const unsigned char *)relative; *p; ++p)
-        if (!(std::isalnum(*p) || *p == '/' || *p == '_' || *p == '-' || *p == '.' ||
-              *p == ' ' || *p == '(' || *p == ')')) return false;
+        // Any printable character FAT allows in a name is accepted (photos are often called "IMG+1 [2].jpg");
+        // path traversal is still blocked by the ".." and leading-"/" checks above. Bytes >= 0x80 pass through (UTF-8 names).
+        if (*p < 0x20 || *p == 0x7F || strchr("\\:*?\"<>|", *p)) return false;
     return snprintf(out, 96, "/sdcard/%s", relative) < 96;
 }
 
@@ -529,6 +531,77 @@ void storage_reader_close(StorageReader *reader) {
     spi_gate_unlock();
     reader->handle = nullptr;
     if (result != 0) ESP_LOGW(kTag, "media file close failed");
+}
+
+// ---- directory browsing (keyset paging, bounded RAM: a page of entries, never the whole directory) ----
+size_t storage_dir_page(const char *relative_dir, const DirEntry *anchor, bool before, DirEntry *out, size_t capacity, size_t *total) {
+    if (total) *total = 0;
+    if (!s_ready || !out || !capacity) return 0;
+    char path[96];
+    if (!make_path(relative_dir, path)) return 0;
+    DirEntry anchor_copy;                       // the caller may pass an entry that lives inside `out`
+    if (anchor) { anchor_copy = *anchor; anchor = &anchor_copy; }
+    spi_gate_lock();
+    DIR *dir = opendir(path);
+    size_t count = 0, all = 0;
+    if (dir) {
+        for (;;) {
+            errno = 0;
+            struct dirent *e = readdir(dir);
+            if (!e) break;
+            if (e->d_name[0] == '.' || strlen(e->d_name) >= sizeof(out[0].name)) continue;
+            ++all;
+            dir_window_offer(out, count, capacity, anchor, before, e->d_type == DT_DIR, e->d_name);
+        }
+        closedir(dir);
+        for (size_t i = 0; i < count; ++i) {          // sizes only for the entries that are actually shown
+            if (out[i].is_dir) continue;
+            char full[160]; struct stat st{};
+            if (snprintf(full, sizeof(full), "%s/%s", path, out[i].name) < (int)sizeof(full) && stat(full, &st) == 0) out[i].size = (uint32_t)st.st_size;
+        }
+    } else {
+        ESP_LOGW(kTag, "cannot open %s: errno=%d", path, errno);
+    }
+    spi_gate_unlock();
+    if (total) *total = all;
+    return count;
+}
+
+bool storage_make_dir(const char *relative_dir) {
+    if (!s_ready) return false;
+    char path[96];
+    if (!make_path(relative_dir, path)) return false;
+    spi_gate_lock();
+    const bool ok = mkdir(path, 0775) == 0 || errno == EEXIST;
+    spi_gate_unlock();
+    return ok;
+}
+
+// ---- general file handles (map indexer / cache) ----
+void *storage_file_open(const char *relative_path, const char *mode) {
+    if (!s_ready || !mode) return nullptr;
+    char path[96];
+    if (!make_path(relative_path, path)) return nullptr;
+    spi_gate_lock();
+    FILE *f = fopen(path, mode);
+    spi_gate_unlock();
+    return f;
+}
+size_t storage_file_read(void *h, void *buffer, size_t bytes) {
+    if (!h || !buffer || !bytes) return 0;
+    spi_gate_lock(); const size_t n = fread(buffer, 1, bytes, static_cast<FILE *>(h)); spi_gate_unlock(); return n;
+}
+bool storage_file_write(void *h, const void *buffer, size_t bytes) {
+    if (!h || !buffer) return false;
+    spi_gate_lock(); const bool ok = fwrite(buffer, 1, bytes, static_cast<FILE *>(h)) == bytes; spi_gate_unlock(); return ok;
+}
+bool storage_file_seek(void *h, size_t offset) {
+    if (!h || offset > static_cast<size_t>(LONG_MAX)) return false;
+    spi_gate_lock(); const bool ok = fseek(static_cast<FILE *>(h), static_cast<long>(offset), SEEK_SET) == 0; spi_gate_unlock(); return ok;
+}
+void storage_file_close(void *h) {
+    if (!h) return;
+    spi_gate_lock(); fclose(static_cast<FILE *>(h)); spi_gate_unlock();
 }
 
 bool storage_gps_track_start(const char *name) {
