@@ -6,6 +6,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "radio_backend.h"
 #include "rx_recalibration.h"
@@ -185,6 +187,66 @@ esp_err_t marauder_radio_monitor_end(void) {
 
 bool marauder_radio_monitor_active(void) { return s_monitor; }
 
+/* ---- Passive Wi-Fi scan (for apps) ------------------------------------------ */
+static wifi_ap_record_t *s_scan_recs;
+static uint16_t s_scan_n;
+
+void marauder_radio_wifi_scan_free(void) {
+    free(s_scan_recs);
+    s_scan_recs = NULL;
+    s_scan_n = 0;
+}
+
+esp_err_t marauder_radio_wifi_scan(uint16_t *found) {
+    if (found) *found = 0;
+    if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE) return ESP_ERR_TIMEOUT;
+    if (s_monitor || s_tx_session) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    marauder_radio_wifi_scan_free();
+    const uint16_t cap = 16;
+    s_scan_recs = (wifi_ap_record_t *)calloc(cap, sizeof(wifi_ap_record_t));
+    if (!s_scan_recs) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_ERR_NO_MEM;
+    }
+    (void)rx_lo_select(false); /* normal Wi-Fi front-end configuration */
+    esp_err_t e = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (e == ESP_OK) {
+        wifi_scan_config_t sc = { 0 };
+        sc.show_hidden = true;
+        sc.scan_type = WIFI_SCAN_TYPE_PASSIVE; /* receive only: no probe requests */
+        sc.scan_time.passive = 120;
+        e = esp_wifi_scan_start(&sc, true);
+    }
+    if (e == ESP_OK) {
+        uint16_t n = cap;
+        e = esp_wifi_scan_get_ap_records(&n, s_scan_recs);
+        if (e == ESP_OK) s_scan_n = n;
+    }
+    (void)esp_wifi_clear_ap_list();
+    (void)esp_wifi_set_mode(WIFI_MODE_NULL);
+    s_rx_ready = false; /* force a full SDR retune + recalibration */
+    prepare_rx();
+    xSemaphoreGive(s_radio_mutex);
+    if (e == ESP_OK && found) *found = s_scan_n;
+    return e;
+}
+
+bool marauder_radio_wifi_scan_get(unsigned index, char ssid[33], int *rssi, int *channel, int *auth) {
+    if (!s_scan_recs || index >= s_scan_n) return false;
+    const wifi_ap_record_t *r = &s_scan_recs[index];
+    if (ssid) {
+        memcpy(ssid, r->ssid, 32);
+        ssid[32] = 0;
+    }
+    if (rssi) *rssi = r->rssi;
+    if (channel) *channel = r->primary;
+    if (auth) *auth = (int)r->authmode;
+    return true;
+}
+
 /* ---- CW transmit session (PHY test mode) -------------------------------- */
 static int s_tx_chan = 1;
 static unsigned s_tx_backoff = 127;
@@ -222,6 +284,34 @@ esp_err_t marauder_radio_tx_cw_set(bool on, int wifi_channel, unsigned backoff_q
     s_tx_backoff = backoff_quarter_db;
     ESP_LOGI("radio_tx", "tone %s ch %d backoff %u", on ? "on" : "off", wifi_channel, backoff_quarter_db);
     if (on) esp_phy_wifi_tx_tone(1, (uint32_t)wifi_channel, backoff_quarter_db);
+    s_tx_on = on;
+    xSemaphoreGive(s_radio_mutex);
+    return ESP_OK;
+}
+
+esp_err_t marauder_radio_tx_cw_set_freq(bool on, unsigned mhz, unsigned backoff_quarter_db) {
+    if (mhz < 1000u || mhz > 6000u || backoff_quarter_db > 127) return ESP_ERR_INVALID_ARG;
+    const int d = (int)mhz - 2407;
+    int chan = mhz == 2484u ? 14 : (d >= 0 ? (d + 2) / 5 : -((-d + 2) / 5)); /* nearest 5 MHz channel */
+    if (chan == 14 && mhz != 2484u) chan = 13;                              /* channel 14 is 2484, not 2477 */
+    const unsigned grid = chan == 14 ? 2484u : (unsigned)(2407 + 5 * chan);
+    if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
+        return ESP_ERR_TIMEOUT;
+    if (!s_tx_session) {
+        xSemaphoreGive(s_radio_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_tx_on) esp_phy_wifi_tx_tone(0, (uint32_t)s_tx_chan, s_tx_backoff); /* never retune a running tone */
+    s_tx_chan = chan;
+    s_tx_backoff = backoff_quarter_db;
+    ESP_LOGI("radio_tx", "tone %s %u MHz (ch %d, grid %u) backoff %u", on ? "on" : "off", mhz, chan, grid, backoff_quarter_db);
+    if (on) {
+        esp_phy_wifi_tx_tone(1, (uint32_t)chan, backoff_quarter_db);
+        if (grid != mhz) { /* experimental fine tune: the same synthesizer call the RX path uses */
+            const unsigned xtal = rtc_clk_xtal_freq_get();
+            rom_set_rf_freq_offset(xtal == 26 ? 1 : xtal == 24 ? 2 : 0, mhz, 0);
+        }
+    }
     s_tx_on = on;
     xSemaphoreGive(s_radio_mutex);
     return ESP_OK;
@@ -347,14 +437,30 @@ esp_err_t marauder_radio_init(void) {
     return ESP_OK;
 }
 
+static volatile bool s_tune_unlock;
+static volatile bool s_span_unlock;
+void marauder_radio_set_tune_unlock(bool on) { s_tune_unlock = on; }
+bool marauder_radio_tune_unlock(void) { return s_tune_unlock; }
+void marauder_radio_set_span_unlock(bool on) { s_span_unlock = on; }
+bool marauder_radio_span_unlock(void) { return s_span_unlock; }
+uint32_t marauder_radio_freq_min_mhz(void) {
+    return s_tune_unlock ? MARAUDER_RADIO_FREQ_UNLOCK_MIN_MHZ : MARAUDER_RADIO_FREQ_MIN_MHZ;
+}
+uint32_t marauder_radio_freq_max_mhz(void) {
+    return s_tune_unlock ? MARAUDER_RADIO_FREQ_UNLOCK_MAX_MHZ : MARAUDER_RADIO_FREQ_MAX_MHZ;
+}
+uint32_t marauder_radio_span_max_mhz(void) {
+    return s_span_unlock ? MARAUDER_SPAN_UNLOCK_MAX_MHZ : MARAUDER_SPAN_MAX_MHZ;
+}
+
 esp_err_t marauder_radio_capture_iq8(uint32_t center_mhz, size_t count, int8_t *iq) {
     if (!iq || count < 256 || count > MAX_SAMPLES) return ESP_ERR_INVALID_ARG;
     /* Frequencies above the 2.4 GHz band remain direct-PLL tune attempts, not
      * a claim of calibrated reception. Requests through 2800 MHz are accepted
      * so the hardware behavior can be evaluated; >2651 MHz is beyond the
      * conservative envelope documented by rx_lo.h. */
-    if (center_mhz < MARAUDER_RADIO_FREQ_MIN_MHZ ||
-        center_mhz > MARAUDER_RADIO_FREQ_MAX_MHZ) return ESP_ERR_NOT_SUPPORTED;
+    if (center_mhz < marauder_radio_freq_min_mhz() ||
+        center_mhz > marauder_radio_freq_max_mhz()) return ESP_ERR_NOT_SUPPORTED;
     if (!s_radio_mutex || xSemaphoreTake(s_radio_mutex, portMAX_DELAY) != pdTRUE)
         return ESP_ERR_TIMEOUT;
     if (s_tx_session || s_monitor) {

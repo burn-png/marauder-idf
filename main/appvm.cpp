@@ -70,6 +70,21 @@ State Machine::run(uint32_t now_ms, uint32_t max_steps) {
             case STORE: if (!pop(&a) || !pop(&b)) break; if (a < 0 || a >= (int32_t)kMem) { fail(Fault::MEM_RANGE); break; } mem_[a] = (int16_t)b; break;
             case RND: if (!pop(&a)) break; push(a > 0 && host_.random ? (int32_t)(host_.random(host_.ctx) % (uint32_t)a) : 0); break;
             case KEY: push(key_); key_ = 0; break;
+            case STR: {   // inline: len, chars; stack: addr. Stores the characters one per word, then a 0 terminator.
+                if (pc_ >= len_) { fail(Fault::PC_RANGE); break; }
+                const size_t n = code_[pc_++];
+                if (n > kMaxText * 2 || pc_ + n > len_) { fail(Fault::TEXT_RANGE); break; }
+                if (!pop(&a)) break;
+                if (a < 0 || a + (int32_t)n + 1 > (int32_t)kMem) { fail(Fault::MEM_RANGE); break; }
+                for (size_t i = 0; i < n; ++i) mem_[a + i] = code_[pc_ + i];
+                mem_[a + n] = 0; pc_ += n;
+                break; }
+            case SYS: {   // stack: a b c fn (fn on top) -> result
+                int32_t fn, sc, sb, sa;
+                if (!host_.sys) { fail(Fault::BAD_OPCODE); break; }
+                if (!pop(&fn) || !pop(&sc) || !pop(&sb) || !pop(&sa)) break;
+                push(host_.sys(host_.ctx, (uint16_t)fn, (int16_t)sa, (int16_t)sb, (int16_t)sc, mem_, kMem));
+                break; }
             case FRAME: if (!pop(&a)) break; if (a < 0) a = 0; if (a > 5000) a = 5000; wake_ms_ = now_ms + (uint32_t)a; state_ = State::WAITING; break;
             case CLS: if (host_.clear) host_.clear(host_.ctx); break;
             case RECT: {   // x y w h color

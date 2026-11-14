@@ -2,6 +2,7 @@
 #include "include/storage.hpp"
 #include "radio_backend.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -14,7 +15,7 @@
 namespace marauder {
 namespace {
 constexpr char kTag[] = "foxtx";
-constexpr uint8_t kVersion = 2;
+constexpr uint8_t kVersion = 4; // 4: MULTI uses a custom frequency list (older saved configs fall back to defaults)
 
 struct HopSet { const char *name; uint8_t count; uint16_t mhz[24]; };
 constexpr HopSet kHopSets[] = {
@@ -26,6 +27,19 @@ constexpr HopSet kHopSets[] = {
 };
 constexpr unsigned kHopSetCount = sizeof(kHopSets) / sizeof(*kHopSets);
 
+bool is_hop(uint8_t mode) { return mode == (uint8_t)FoxMode::HOP || mode == (uint8_t)FoxMode::MULTI; }
+bool off_grid(unsigned mhz) { return mhz != 2484u && ((int)mhz - 2407) % 5 != 0; } // not on the SDK's 5 MHz channel grid
+
+// The rotation for HOP (a fixed set) or MULTI (the ticked channels).
+HopSet make_hop(const FoxConfig &c) {
+    if (c.mode != (uint8_t)FoxMode::MULTI) return kHopSets[c.hop_set % kHopSetCount];
+    HopSet h{"MULTI", 0, {}};
+    for (unsigned i = 0; i < c.multi_count && i < kFoxMultiMax; ++i)
+        if (c.multi_on & (1u << i)) h.mhz[h.count++] = c.multi_mhz[i];
+    if (!h.count) h.mhz[h.count++] = 2437;
+    return h;
+}
+
 std::atomic<bool> s_stop{false};
 std::atomic<bool> s_running{false};
 std::atomic<bool> s_carrier_on{false};
@@ -35,6 +49,11 @@ std::atomic<int32_t> s_last_err{ESP_OK};
 std::atomic<int64_t> s_start_us{0};
 TaskHandle_t s_task{};          // published by the task itself, cleared under s_cfg_lock
 std::atomic<bool> s_starting{false};
+std::atomic<const char *> s_stage{"IDLE"}; // last step reached, shown on the Fox page when a start fails
+// 8 KiB, same as the radio_dsp task, which already runs the PHY retune/calibration calls this task
+// makes. 12 KiB no longer fits: the largest free internal block on the Fox page is about 11 KiB.
+constexpr uint32_t kTxStackBytes = 8192;
+std::atomic<uint32_t> s_stack_free{0}; // lowest free stack seen (bytes), for the Fox page
 portMUX_TYPE s_cfg_lock = portMUX_INITIALIZER_UNLOCKED;
 FoxConfig s_live{};
 char s_manual_call[kFoxTextMax + 1]; // copy of the live manual callsign (read without the lock)
@@ -80,10 +99,11 @@ bool wait_ms(uint32_t ms) {
 struct Ctx { unsigned freq; unsigned backoff; bool on; };
 
 bool apply(Ctx &c, bool on) {
-    const esp_err_t e = marauder_radio_tx_cw_set(on, fox_freq_channel(c.freq), c.backoff);
+    const esp_err_t e = marauder_radio_tx_cw_set_freq(on, c.freq, c.backoff);
     if (e != ESP_OK) { s_last_err.store(e); return false; }
     c.on = on;
     s_carrier_on.store(on);
+    if (on) s_stage.store(off_grid(c.freq) ? "RUNNING (FINE TUNE UNVERIFIED)" : "RUNNING");
     return true;
 }
 
@@ -127,7 +147,7 @@ size_t clean_text(char *dst, size_t cap, const char *src) {
 // Re-read the live settings and apply tuning at a safe point (carrier off).
 void sync_tuning(Ctx &c) {
     const FoxConfig cfg = live();
-    if (cfg.mode == (uint8_t)FoxMode::HOP) return; // hop owns the frequency
+    if (is_hop(cfg.mode)) return; // hop owns the frequency
     (void)tune(c, cfg.freq_mhz, fox_backoff_quarter_db(cfg.power));
 }
 
@@ -158,15 +178,20 @@ void tx_task(void *) {
     s_task = xTaskGetCurrentTaskHandle();
     portEXIT_CRITICAL(&s_cfg_lock);
     s_starting.store(false);
+    s_stage.store("TASK STARTED");
     FoxConfig cfg = live();
     Ctx c{cfg.freq_mhz, fox_backoff_quarter_db(cfg.power), false};
-    if (cfg.mode == (uint8_t)FoxMode::HOP) c.freq = kHopSets[cfg.hop_set % kHopSetCount].mhz[0];
+    if (is_hop(cfg.mode)) c.freq = make_hop(cfg).mhz[0];
+    s_stage.store("CW BEGIN");
     esp_err_t err = marauder_radio_tx_cw_begin();
+    if (err == ESP_OK) s_stage.store("CW TONE ON");
     if (err == ESP_OK && cfg.mode != (uint8_t)FoxMode::MORSE) {
-        err = marauder_radio_tx_cw_set(true, fox_freq_channel(c.freq), c.backoff);
+        err = marauder_radio_tx_cw_set_freq(true, c.freq, c.backoff);
         c.on = (err == ESP_OK);
     }
     if (err != ESP_OK) {
+        s_stage.store("CW BEGIN/TONE FAILED");
+        ESP_LOGE(kTag, "start failed: %s", esp_err_to_name(err));
         s_last_err.store(err);
         marauder_radio_tx_cw_end();
         s_running.store(false);
@@ -181,6 +206,7 @@ void tx_task(void *) {
     s_carrier_on.store(c.on);
     s_start_us.store(esp_timer_get_time());
     s_running.store(true);
+    s_stage.store(off_grid(c.freq) ? "RUNNING (FINE TUNE UNVERIFIED)" : "RUNNING");
     ESP_LOGI(kTag, "TX start: %u MHz (channel %d)", c.freq, fox_freq_channel(c.freq));
 
     uint8_t last_mode = cfg.mode;
@@ -191,9 +217,10 @@ void tx_task(void *) {
     int msg_idx = -1;
 
     while (!should_stop()) {
+        s_stack_free.store((uint32_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t));
         cfg = live();
         const unsigned backoff = fox_backoff_quarter_db(cfg.power);
-        const HopSet &hop = kHopSets[cfg.hop_set % kHopSetCount];
+        const HopSet hop = make_hop(cfg);
         const bool morse = cfg.mode == (uint8_t)FoxMode::MORSE;
 
         if (cfg.mode != last_mode) { // mode changed on the fly: restart that mode's state
@@ -204,7 +231,7 @@ void tx_task(void *) {
             if (!morse) (void)carrier(c, true);
         }
         // Frequency / power follow the settings (hop picks its own frequency).
-        const unsigned want_freq = cfg.mode == (uint8_t)FoxMode::HOP ? hop.mhz[hop_idx % hop.count] : cfg.freq_mhz;
+        const unsigned want_freq = is_hop(cfg.mode) ? hop.mhz[hop_idx % hop.count] : cfg.freq_mhz;
         if (!tune(c, want_freq, backoff)) break;
 
         if (morse) {
@@ -233,7 +260,7 @@ void tx_task(void *) {
             next_id = now_ms() + (uint64_t)cfg.id_every_s * 1000u;
             continue;
         }
-        if (cfg.mode == (uint8_t)FoxMode::HOP && t >= next_step) {
+        if (is_hop(cfg.mode) && t >= next_step) {
             hop_idx = (hop_idx + 1) % hop.count;
             if (!tune(c, hop.mhz[hop_idx], backoff)) break;
             next_step = now_ms() + cfg.interval_ms;
@@ -244,11 +271,11 @@ void tx_task(void *) {
             if (!carrier(c, burst_on)) break;
             const uint32_t d = burst_on ? on_ms : off_ms;
             next_step = now_ms() + (d < 20u ? 20u : jitter(d));
-        } else if (cfg.mode == (uint8_t)FoxMode::STEADY || cfg.mode == (uint8_t)FoxMode::HOP) {
+        } else if (cfg.mode == (uint8_t)FoxMode::STEADY || is_hop(cfg.mode)) {
             if (!c.on && !carrier(c, true)) break;
         }
         uint64_t deadline = UINT64_MAX;
-        if (cfg.mode == (uint8_t)FoxMode::HOP || cfg.mode == (uint8_t)FoxMode::BURST) deadline = next_step;
+        if (is_hop(cfg.mode) || cfg.mode == (uint8_t)FoxMode::BURST) deadline = next_step;
         if (id_on && next_id < deadline) deadline = next_id;
         const uint64_t n = now_ms();
         uint32_t w = deadline == UINT64_MAX ? 250u : (deadline > n ? (uint32_t)(deadline - n) : 1u);
@@ -256,6 +283,9 @@ void tx_task(void *) {
         if (wait_ms(w)) break;
     }
 
+    s_stack_free.store((uint32_t)uxTaskGetStackHighWaterMark(nullptr) * sizeof(StackType_t));
+    ESP_LOGI(kTag, "stack: %u of %u bytes unused at the low-water mark", (unsigned)s_stack_free.load(), (unsigned)kTxStackBytes);
+    s_stage.store(s_stop.load() ? "STOPPED (REQUESTED)" : s_last_err.load() != ESP_OK ? "STOPPED (RADIO ERROR)" : "STOPPED (DURATION)");
     marauder_radio_tx_cw_end();
     s_carrier_on.store(false);
     s_running.store(false);
@@ -287,6 +317,9 @@ FoxConfig fox_config_defaults() {
     c.interval_ms = 1500;
     c.id_every_s = 0;
     c.duration_min = 0;
+    c.multi_count = 3;
+    c.multi_mhz[0] = 2412; c.multi_mhz[1] = 2437; c.multi_mhz[2] = 2462;
+    c.multi_on = 0x7;
     return c; // no callsign: it comes from callsign.txt or the user
 }
 
@@ -299,11 +332,15 @@ void fox_config_sanitize(FoxConfig &c) {
     c.random_order = c.random_order ? 1 : 0;
     if (c.freq_mhz < kFoxFreqMin) c.freq_mhz = kFoxFreqMin;
     if (c.freq_mhz > kFoxFreqMax) c.freq_mhz = kFoxFreqMax;
-    c.freq_mhz = (uint16_t)(kFoxFreqMin + ((c.freq_mhz - kFoxFreqMin + 2) / 5) * 5); // snap to the 5 MHz grid
-    if (c.freq_mhz > kFoxFreqMax) c.freq_mhz = kFoxFreqMax;
     if (c.interval_ms < 200 || c.interval_ms > 20000) c.interval_ms = 1500;
     if (c.id_every_s > 3600) c.id_every_s = 0;
     if (c.duration_min > 720) c.duration_min = 0;
+    if (c.multi_count < 1 || c.multi_count > kFoxMultiMax) c.multi_count = 1;
+    for (unsigned i = 0; i < kFoxMultiMax; ++i) {
+        if (c.multi_mhz[i] < kFoxFreqMin || c.multi_mhz[i] > kFoxFreqMax) c.multi_mhz[i] = 2437;
+    }
+    c.multi_on &= (uint16_t)((1u << c.multi_count) - 1u);
+    if (!c.multi_on) c.multi_on = 1;
     c.text[kFoxTextMax] = 0;
     c.call[kFoxTextMax] = 0;
     char clean[kFoxTextMax + 1];
@@ -337,9 +374,48 @@ void fox_config_save(const FoxConfig &config) {
 }
 
 const char *fox_mode_name(uint8_t mode) {
-    switch (mode) { case (uint8_t)FoxMode::STEADY: return "STEADY"; case (uint8_t)FoxMode::BURST: return "BURST"; case (uint8_t)FoxMode::HOP: return "HOP"; case (uint8_t)FoxMode::MORSE: return "MORSE"; default: return "?"; }
+    switch (mode) { case (uint8_t)FoxMode::STEADY: return "STEADY"; case (uint8_t)FoxMode::BURST: return "BURST"; case (uint8_t)FoxMode::HOP: return "HOP"; case (uint8_t)FoxMode::MORSE: return "MORSE"; case (uint8_t)FoxMode::MULTI: return "MULTI"; default: return "?"; }
 }
 unsigned fox_hop_set_count() { return kHopSetCount; }
+unsigned fox_multi_enabled_count(const FoxConfig &c) {
+    unsigned n = 0;
+    for (unsigned i = 0; i < c.multi_count && i < kFoxMultiMax; ++i) n += (c.multi_on >> i) & 1u;
+    return n;
+}
+bool fox_multi_toggle(FoxConfig &c, unsigned index) {
+    if (index >= c.multi_count) return false;
+    const uint16_t bit = (uint16_t)(1u << index);
+    if ((c.multi_on & bit) && fox_multi_enabled_count(c) <= 1) return false; // keep at least one on
+    c.multi_on ^= bit;
+    return true;
+}
+bool fox_multi_add(FoxConfig &c, unsigned mhz) {
+    if (c.multi_count >= kFoxMultiMax) return false;
+    if (mhz < kFoxFreqMin) mhz = kFoxFreqMin;
+    if (mhz > kFoxFreqMax) mhz = kFoxFreqMax;
+    c.multi_mhz[c.multi_count] = (uint16_t)mhz;
+    c.multi_on |= (uint16_t)(1u << c.multi_count);
+    ++c.multi_count;
+    return true;
+}
+bool fox_multi_remove(FoxConfig &c, unsigned index) {
+    if (c.multi_count <= 1 || index >= c.multi_count) return false;
+    for (unsigned i = index; i + 1 < c.multi_count; ++i) {
+        c.multi_mhz[i] = c.multi_mhz[i + 1];
+        const uint16_t next = (uint16_t)((c.multi_on >> (i + 1)) & 1u);
+        c.multi_on = (uint16_t)((c.multi_on & ~(1u << i)) | (next << i));
+    }
+    --c.multi_count;
+    c.multi_on &= (uint16_t)((1u << c.multi_count) - 1u);
+    if (!c.multi_on) c.multi_on = 1; // never leave the rotation empty
+    return true;
+}
+void fox_multi_set(FoxConfig &c, unsigned index, unsigned mhz) {
+    if (index >= c.multi_count) return;
+    if (mhz < kFoxFreqMin) mhz = kFoxFreqMin;
+    if (mhz > kFoxFreqMax) mhz = kFoxFreqMax;
+    c.multi_mhz[index] = (uint16_t)mhz;
+}
 const char *fox_hop_set_name(unsigned i) { return kHopSets[i % kHopSetCount].name; }
 unsigned fox_backoff_quarter_db(unsigned power) {
     // power 32 = +20 dBm nominal = no attenuation; each step down is 1 dB (4 quarter-dB units), floor 31.75 dB.
@@ -382,7 +458,8 @@ const char *fox_callsign() {
 }
 
 esp_err_t fox_start(const FoxConfig &config) {
-    if (s_task || s_starting.load()) return ESP_ERR_INVALID_STATE;
+    if (s_task || s_starting.load()) { s_stage.store("BUSY: PREVIOUS TX NOT ENDED"); return ESP_ERR_INVALID_STATE; }
+    s_stage.store("START REQUESTED");
     FoxConfig c = config;
     fox_config_sanitize(c);
     portENTER_CRITICAL(&s_cfg_lock);
@@ -397,7 +474,10 @@ esp_err_t fox_start(const FoxConfig &config) {
     s_running.store(true); // visible to the UI at once; the task clears it on failure
     // 8 KiB: the PHY and Wi-Fi calls made when the session ends need far more than 4 KiB.
     s_starting.store(true);
-    if (xTaskCreatePinnedToCore(tx_task, "fox_tx", 12288, nullptr, 6, nullptr, 0) != pdPASS) {
+    if (xTaskCreatePinnedToCore(tx_task, "fox_tx", kTxStackBytes, nullptr, 6, nullptr, 0) != pdPASS) {
+        ESP_LOGE(kTag, "task create failed: need %u B stack, largest internal block %u B",
+                 (unsigned)kTxStackBytes, (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        s_stage.store("TASK CREATE FAILED (MEMORY)");
         s_starting.store(false);
         s_running.store(false);
         return ESP_ERR_NO_MEM;
@@ -434,6 +514,10 @@ void fox_stop() {
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
+
+const char *fox_stage() { return s_stage.load(); }
+unsigned fox_stack_bytes() { return kTxStackBytes; }
+unsigned fox_stack_free_bytes() { return s_stack_free.load(); }
 
 FoxStatus fox_status() {
     FoxStatus st{};

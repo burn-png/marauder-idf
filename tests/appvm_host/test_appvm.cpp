@@ -27,7 +27,81 @@ static State frame(Machine &m, int16_t key = 0) {
     if (s == State::WAITING) { assert(m.depth() == 0); g_now += 1000; }   // stack must be balanced at every frame boundary
     return s;
 }
+
+// ---- SYS opcode: argument order, result, missing host table, stack underflow ----
+struct SysRec { uint16_t fn = 0; int16_t a = 0, b = 0, c = 0; int calls = 0; };
+static int16_t sys_cb(void *ctx, uint16_t fn, int16_t a, int16_t b, int16_t c, int16_t *mem, size_t n) {
+    (void)mem; (void)n;
+    auto *r = (SysRec *)ctx; r->fn = fn; r->a = a; r->b = b; r->c = c; ++r->calls; return (int16_t)(a + b + c + fn);
+}
+static void test_sys() {
+    // push 1, 2, 3, then fn 20, SYS, then store result to mem[0], HALT
+    const uint8_t prog[] = {1, 1, 1, 2, 1, 3, 1, 20, 60, 1, 0, 41, 0};
+    Machine m; assert(m.load(prog, sizeof prog));
+    Rec rec; Host h = host(rec); m.set_host(h);
+    m.run(0, 1000); assert(m.state() == State::FAULT && m.fault() == Fault::BAD_OPCODE);   // no sys table: refused
+    SysRec sr; h.sys = sys_cb; h.ctx = &sr; m.set_host(h); m.reset();
+    m.run(0, 1000); assert(m.state() == State::HALTED); assert(sr.calls == 1);
+    assert(sr.fn == 20 && sr.a == 1 && sr.b == 2 && sr.c == 3);
+    const uint8_t under[] = {1, 1, 1, 20, 60, 0};   // only two operands below fn
+    Machine u; assert(u.load(under, sizeof under)); u.set_host(h); sr.calls = 0;
+    u.run(0, 1000); assert(u.state() == State::FAULT && u.fault() == Fault::STACK_UNDERFLOW); assert(sr.calls == 0);
+    printf("SYS opcode ok\n");
+}
+
+// ---- STR opcode: stores a 0-terminated string into app memory, bounds-checked ----
+static void test_str() {
+    const uint8_t prog[] = {1, 10, 61, 3, 'A', 'B', 'C', 0};     // push 10, STR "ABC", HALT
+    Machine m; assert(m.load(prog, sizeof prog)); Rec rec; m.set_host(host(rec));
+    m.run(0, 100); assert(m.state() == State::HALTED);
+    const uint8_t prog2[] = {1, 10, 61, 3, 'A', 'B', 'C', 1, 10, 40, 4, 1, 11, 40, 4, 0};  // read mem[10], mem[11] back via LOAD
+    Machine m2; assert(m2.load(prog2, sizeof prog2)); m2.set_host(host(rec));
+    m2.run(0, 100); assert(m2.state() == State::HALTED && m2.depth() == 0);
+    const uint8_t bad[] = {2, 0xFE, 0x04, 61, 3, 'A', 'B', 'C', 0};   // address 1278: 1278+3+1 > 1280
+    Machine m3; assert(m3.load(bad, sizeof bad)); m3.set_host(host(rec));
+    m3.run(0, 100); assert(m3.state() == State::FAULT && m3.fault() == Fault::MEM_RANGE);
+    const uint8_t trunc[] = {1, 0, 61, 9, 'A'};                         // declared length runs past the code
+    Machine m4; assert(m4.load(trunc, sizeof trunc)); m4.set_host(host(rec));
+    m4.run(0, 100); assert(m4.state() == State::FAULT && m4.fault() == Fault::TEXT_RANGE);
+    printf("STR opcode ok\n");
+}
+
+// ---- SDLIST.APP against a mock file system: listing, selection, preview, string drawing ----
+struct Fs : Rec { bool open_ok = false; int closes = 0; };   // Rec first: the draw callbacks share this context
+static int16_t fs_sys(void *ctx, uint16_t fn, int16_t a, int16_t b, int16_t c, int16_t *mem, size_t n) {
+    auto *f = (Fs *)ctx; (void)c;
+    static const char *names[2] = {"MAPS", "README.TXT"};
+    auto str_at = [&](int addr) { std::string t; while ((size_t)addr < n && mem[addr]) t += (char)mem[addr++]; return t; };
+    switch (fn) {
+        case 37: return str_at(a).empty() ? 2 : -1;                        // root listing only
+        case 38: { if (a < 0 || a > 1) return -1; size_t l = strlen(names[a]); for (size_t i = 0; i < l; ++i) mem[b + i] = names[a][i]; mem[b + l] = 0; return (int16_t)l; }
+        case 39: return a == 0 ? 1 : 0;
+        case 29: return 1;
+        case 27: f->texts.push_back(str_at(a)); return 1;
+        case 30: f->open_ok = str_at(a) == "README.TXT" && b == 0; return f->open_ok;
+        case 33: { if (!f->open_ok) return -1; const char *d = "hello world\n"; int got = 0; for (; got < b && d[got]; ++got) mem[a + got] = d[got]; return got; }
+        case 36: ++f->closes; return 1;
+    }
+    return -1;
+}
+static void test_sdlist(const char *path) {
+    auto code = load_app(path);
+    Machine m; assert(m.load(code.data(), code.size()));
+    Fs fs; Rec &rec = fs; Host h = host(rec); h.sys = fs_sys; h.ctx = &fs; m.set_host(h);
+    g_now = 0;
+    State s = frame(m); assert(s == State::WAITING);                       // listed and idle
+    assert(has(rec, "MAPS") && has(rec, "README.TXT"));
+    frame(m, K_DOWN); frame(m); frame(m, K_CENTER); frame(m);               // select README.TXT, preview it
+    assert(has(rec, "hello world."));                                       // newline shown as '.'
+    assert(fs.closes == 1);                                                 // file closed after the preview
+    frame(m, K_UP); frame(m, K_CENTER); frame(m);                           // folder selected: no preview, no fault
+    assert(m.state() != State::FAULT);
+    printf("SDLIST ok\n");
+}
 int main(int argc, char **argv) {
+    test_sys();
+    test_sdlist("../../sdcard_examples/APPS/SDLIST.APP");
+    test_str();
     assert(argc > 1);
     auto code = load_app(argv[1]);
     // ---- plain run: snake goes right into the wall ----

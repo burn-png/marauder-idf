@@ -9,7 +9,7 @@ namespace marauder {
 // channels the SDK documents; the beacon also passes other channel numbers straight through to reach
 // 1802..2802 MHz (on a 5 MHz grid that includes 2412, 2437, ...). The silicon may ignore or reject
 // those; that is untested.
-enum class FoxMode : uint8_t { STEADY, BURST, HOP, MORSE, COUNT };
+enum class FoxMode : uint8_t { STEADY, BURST, HOP, MORSE, MULTI, COUNT }; // MULTI: hop through your own list of frequencies
 
 inline constexpr unsigned kFoxTextMax = 16;
 inline constexpr unsigned kFoxPowerMax = 32;        // power 0..32 = -12 .. +20 dBm (nominal)
@@ -29,6 +29,9 @@ struct FoxConfig {
     uint16_t interval_ms; // burst period / hop dwell / Morse pause
     uint16_t id_every_s;  // CW ID period for steady/burst/hop, 0 = off
     uint16_t duration_min;// stop by itself after this long, 0 = until stopped (steady ignores it)
+    uint16_t multi_mhz[12]; // MULTI mode: your frequency list, 1 MHz resolution
+    uint16_t multi_on;      // MULTI mode: bit i set = multi_mhz[i] is enabled
+    uint8_t multi_count;    // MULTI mode: entries in use, 1..kFoxMultiMax
     char text[kFoxTextMax + 1]; // manual Morse message (used when morse.txt is absent)
     char call[kFoxTextMax + 1]; // manual callsign (used when callsign.txt is absent); never defaulted
 };
@@ -42,6 +45,13 @@ struct FoxStatus {
     uint32_t ids;
     esp_err_t last_err;
 };
+
+inline constexpr unsigned kFoxMultiMax = 12;        // entries in the MULTI list
+unsigned fox_multi_enabled_count(const FoxConfig &config);
+bool fox_multi_toggle(FoxConfig &config, unsigned index);              // false if it would leave none enabled
+bool fox_multi_add(FoxConfig &config, unsigned mhz);                   // appended enabled; false if full
+bool fox_multi_remove(FoxConfig &config, unsigned index);              // false if it is the only entry
+void fox_multi_set(FoxConfig &config, unsigned index, unsigned mhz);   // clamped to the allowed range
 
 FoxConfig fox_config_defaults();
 void fox_config_sanitize(FoxConfig &config);
@@ -67,6 +77,9 @@ bool fox_callsign_from_file();
 esp_err_t fox_start(const FoxConfig &config);
 void fox_update(const FoxConfig &config); // apply changed settings to a running transmitter
 void fox_stop();
+const char *fox_stage();     // last step the transmit task reached (diagnostics)
+unsigned fox_stack_bytes();  // stack the transmit task needs
+unsigned fox_stack_free_bytes(); // lowest unused stack seen since the last start (0 before the first start)
 FoxStatus fox_status();
 
 }

@@ -11,7 +11,7 @@ struct SettingsRecord { uint32_t magic; uint16_t version; uint16_t size; AppSett
 struct LegacySettings { uint32_t center_mhz;uint16_t span_mhz;uint16_t frequency_step;uint8_t intensity_floor,intensity_ceiling,waterfall_palette,averaging,history_depth;bool hann_window,max_hold,paused; };
 bool valid_except_center(const AppSettings &s) {
     return s.frequency_step >= 1 && s.frequency_step <= 100 &&
-        s.span_mhz >= 1 && s.span_mhz <= 16 && s.intensity_floor < s.intensity_ceiling &&
+        s.span_mhz >= 1 && s.span_mhz <= marauder_radio_span_max_mhz() && s.intensity_floor < s.intensity_ceiling &&
         s.waterfall_palette <= 2 && s.averaging >= 1 && s.averaging <= 8 &&
         s.history_depth >= 1 && s.history_depth <= 64 && s.trace_floor < s.trace_ceiling &&
         s.joystick_repeat_delay_ms >= 100 && s.joystick_repeat_delay_ms <= 1000 &&
@@ -20,8 +20,8 @@ bool valid_except_center(const AppSettings &s) {
         s.joystick_debounce_ms >= 5 && s.joystick_debounce_ms <= 100 && s.joystick_acceleration <= 3;
 }
 bool valid(const AppSettings &s) {
-    return s.center_mhz >= MARAUDER_RADIO_FREQ_MIN_MHZ &&
-        s.center_mhz <= MARAUDER_RADIO_FREQ_MAX_MHZ && valid_except_center(s);
+    return s.center_mhz >= marauder_radio_freq_min_mhz() &&
+        s.center_mhz <= marauder_radio_freq_max_mhz() && valid_except_center(s);
 }
 }
 AppSettings settings_defaults() {
@@ -98,7 +98,13 @@ esp_err_t settings_load(AppSettings *settings) {
     return (e == ESP_ERR_NVS_NOT_FOUND || e == ESP_ERR_NVS_INVALID_LENGTH || e == ESP_OK) ? ESP_OK : e;
 }
 
-esp_err_t settings_save(const AppSettings &settings) {
+esp_err_t settings_save(const AppSettings &requested) {
+    // Experimental unlocks (Debug tools) are session-only: persist only values that
+    // are valid with the unlocks off, so a reboot never finds an unreadable blob.
+    AppSettings settings = requested;
+    if (settings.center_mhz < MARAUDER_RADIO_FREQ_MIN_MHZ) settings.center_mhz = MARAUDER_RADIO_FREQ_MIN_MHZ;
+    if (settings.center_mhz > MARAUDER_RADIO_FREQ_MAX_MHZ) settings.center_mhz = MARAUDER_RADIO_FREQ_MAX_MHZ;
+    if (settings.span_mhz > MARAUDER_SPAN_MAX_MHZ) settings.span_mhz = MARAUDER_SPAN_MAX_MHZ;
     if (!valid(settings)) return ESP_ERR_INVALID_ARG;
     nvs_handle_t nvs;
     esp_err_t e = nvs_open("marauder", NVS_READWRITE, &nvs);

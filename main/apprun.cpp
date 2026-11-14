@@ -24,7 +24,31 @@ void h_fill(void *, int x, int y, int w, int h, uint8_t c) { display_fill_rect(x
 void h_text(void *, int x, int y, const char *s, uint8_t c) { display_text(x, kTop + y, s, kColor[c & 7], 0x0000); }
 void h_clear(void *) { display_fill_rect(0, kTop, 240, 256, 0x0000); }
 uint32_t h_random(void *) { return esp_random(); }
+const AppSysApi *s_sys = nullptr;
+uint8_t s_text_color = 1;                                // colour for fn 26 / 27, set by fn 29
+int16_t h_sys(void *, uint16_t fn, int16_t a, int16_t b, int16_t c, int16_t *mem, size_t mem_words) {
+    if (!s_sys || !s_sys->call) return -1;
+    if (fn == 26) {   // draw string result at window (b, c): the SSID of Wi-Fi scan entry a
+        const char *t = s_sys->text ? s_sys->text(fn, a) : nullptr;
+        if (!t || !t[0]) return 0;
+        if (b < 0 || b >= (int)vm1::kWinW || c < 0 || c >= (int)vm1::kWinH) return 0;
+        char buf[33]; snprintf(buf, sizeof(buf), "%.32s", t);
+        h_text(nullptr, b, c, buf, s_text_color);
+        return (int16_t)strlen(buf);
+    }
+    if (fn == 27) {   // draw the 0-terminated string stored in the app's memory at address a, at window (b, c)
+        if (b < 0 || b >= (int)vm1::kWinW || c < 0 || c >= (int)vm1::kWinH || a < 0 || (size_t)a >= mem_words) return 0;
+        char buf[41]; size_t i = 0;
+        while (i < 40 && (size_t)a + i < mem_words && mem[a + i] != 0) { buf[i] = (char)(mem[a + i] & 0x7F); ++i; }
+        buf[i] = 0;
+        h_text(nullptr, b, c, buf, s_text_color);
+        return (int16_t)i;
+    }
+    if (fn == 29) { s_text_color = (uint8_t)(a & 7); return 1; }   // text colour for 26 / 27
+    return s_sys->call(fn, a, b, c, mem, mem_words);
 }
+}
+void app_run_set_sys(const AppSysApi *api) { s_sys = api; }
 
 bool app_run_start(const char *rel, char *why, size_t why_size) {
     app_run_stop();
@@ -52,13 +76,17 @@ bool app_run_start(const char *rel, char *why, size_t why_size) {
     }
     free(text);
     if (!len || !s_vm->commit(len)) { delete s_vm; s_vm = nullptr; return fail(len ? "PROGRAM REJECTED" : reason); }
-    vm1::Host h; h.fill = h_fill; h.text = h_text; h.clear = h_clear; h.random = h_random;
+    vm1::Host h; h.fill = h_fill; h.text = h_text; h.clear = h_clear; h.random = h_random; h.sys = h_sys;
     s_vm->set_host(h);
     s_faulted = s_halted = false;
     ESP_LOGI(kTag, "started %s (%u bytes of code)", s_name, (unsigned)len);
     return true;
 }
-void app_run_stop() { delete s_vm; s_vm = nullptr; s_faulted = s_halted = false; }
+void app_run_stop() {
+    const bool was = s_vm != nullptr;
+    delete s_vm; s_vm = nullptr; s_faulted = s_halted = false;
+    if (was && s_sys && s_sys->on_stop) s_sys->on_stop();
+}
 void app_run_restart() { if (s_vm) { s_vm->reset(); s_faulted = s_halted = false; } }
 void app_run_key(int16_t k) { if (s_vm) s_vm->push_key(k); }
 bool app_run_active() { return s_vm != nullptr; }

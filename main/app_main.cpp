@@ -333,6 +333,7 @@ enum class Page : uint8_t { HOME, CATEGORY, DETAIL };
 enum class Category : uint8_t { RECEIVE, TRANSMIT, RECON, CAPTURE, REPLAY, RF_REPLAY, TX_TEST, GPS, LOOKING_GLASS, PROFILES, UTILITIES, SETTINGS, EXTERNALS, DIAGNOSTICS, FOXHUNT };
 enum class Detail : uint8_t { NONE, SPECTRUM, FREQ, GAIN, SCANNER, CAPTURE, CAPTURE_FILES, REPLAY, RF_REPLAY, RF_CONFIGS, TX_TEST, GPS, PROFILES, FILES, FREQ_MANAGER, IQ_TRIM, NOTEPAD, FLASH, DEBUG, STORAGE, DEVICE, SETTINGS, EXTERNALS, DIAG, ANTENNA, STOPWATCH, RANDPWD, CALCULATOR, MEDIA, FOXHUNT, DSP, RSSI_GRAPH, FOXTX, MAP_VIEW, NAV_VIEW, RID_VIEW, APPRUN };
 char s_ext_names[24][64];
+int s_debug_cursor=0; // Debug tools: 0 = tune unlock, 1 = Z unlock
 bool is_map_detail(Detail d);
 void map_radio_hook(bool pause);
 struct Item { const char *name; Detail detail; };
@@ -484,13 +485,15 @@ uint8_t enhance_spectrum_contrast(uint8_t value) {
 }
 void project_trace(const marauder::SpectrumFrame &frame,const marauder::AppSettings &cfg,
                    uint8_t bins[240],uint8_t peaks[240],uint8_t floor_out[240]=nullptr,uint8_t min_out[240]=nullptr) {
-    const unsigned span=std::min<unsigned>(16,std::max<unsigned>(1,cfg.span_mhz));
+    const unsigned span=std::min<unsigned>(marauder_radio_span_max_mhz(),std::max<unsigned>(1,cfg.span_mhz));
     const auto dspc=marauder::dsp_cfg_snapshot();
     static constexpr unsigned range_span[5]={32,64,96,128,192};
     uint8_t raw[240],raw_peak[240],raw_floor[240],raw_min[240];
     for(unsigned i=0;i<240;++i){
         const int centered=(int)i-120;
-        const int source=std::clamp(239-(120+(centered*(int)span)/16),0,239);
+        const int source_raw=239-(120+(centered*(int)span)/16);
+        if(source_raw<0||source_raw>239){raw[i]=raw_peak[i]=raw_floor[i]=raw_min[i]=0;continue;} // Z unlock: outside the 16 MHz capture
+        const int source=source_raw;
         raw[i]=frame.bins[source];
         raw_peak[i]=frame.peaks[source];
         raw_floor[i]=frame.floor[source];
@@ -541,12 +544,14 @@ void project_trace(const marauder::SpectrumFrame &frame,const marauder::AppSetti
     }
 }
 void project_waterfall(const marauder::SpectrumFrame &frame,const marauder::AppSettings &cfg,uint8_t bins[240]) {
-    const unsigned span=std::min<unsigned>(16,std::max<unsigned>(1,cfg.span_mhz));
+    const unsigned span=std::min<unsigned>(marauder_radio_span_max_mhz(),std::max<unsigned>(1,cfg.span_mhz));
     uint8_t raw[240],ordered[240];
     const bool interp=marauder::dsp_cfg_snapshot().w_interp&&span<16;
     for(unsigned i=0;i<240;++i){
         const int centered=(int)i-120;
-        const int source=std::clamp(239-(120+(centered*(int)span)/16),0,239);
+        const int source_raw=239-(120+(centered*(int)span)/16);
+        if(source_raw<0||source_raw>239){raw[i]=0;continue;} // Z unlock: outside the 16 MHz capture
+        const int source=source_raw;
         if(interp){ // linear interpolation between neighbouring bins when zoomed in (waterfall only)
             const int q4=std::clamp(1904-centered*(int)span,0,239*16);
             const int lo=q4>>4,fr=q4&15,hi=std::min(lo+1,239);
@@ -580,7 +585,7 @@ void draw_rf_replay_page(){
     const char *freq_text=field("FREQUENCY_MHZ","unknown"),*rate_text=field("SAMPLE_RATE_HZ","unknown");unsigned long freq=strtoul(freq_text,nullptr,10);size_t bytes=marauder::storage_file_size(name);bool iq8=bytes>=512&&bytes%512==0&&strstr(data,"FORMAT=IQ8_INTERLEAVED");
     snprintf(line,sizeof(line),"FREQ %s RATE %s",freq_text,rate_text);draw_line(2,line);snprintf(line,sizeof(line),"FORMAT %s",field("FORMAT","unknown"));draw_line(3,line);snprintf(line,sizeof(line),"MOD %s",field("MODULATION","unknown"));draw_line(4,line);
     draw_line(5,iq8?"IQ8 FILE OK: OFFLINE FFT":"FORMAT UNSUPPORTED / CONVERT",iq8?C_GREEN:C_AMBER);
-    const bool freq_in_request_range=freq>=MARAUDER_RADIO_FREQ_MIN_MHZ&&freq<=MARAUDER_RADIO_FREQ_MAX_MHZ;
+    const bool freq_in_request_range=freq>=marauder_radio_freq_min_mhz()&&freq<=marauder_radio_freq_max_mhz();
     const bool freq_unverified=freq>MARAUDER_RADIO_FREQ_BAND_MAX_MHZ;
     draw_line(6,!freq_in_request_range?"FREQ OUT OF RX RANGE":freq_unverified?"OUT OF BAND / UNVERIFIED":"IN REQUEST RANGE",
               !freq_in_request_range||freq_unverified?C_RED:C_GREEN);
@@ -767,7 +772,7 @@ bool load_profile(const char *name) {
     if(!read("CENTER_MHZ",&center)||!read("SPAN_MHZ",&span)||!read("STEP_MHZ",&step)||!read("FLOOR",&floorv)||!read("CEILING",&ceilv)||!read("PALETTE",&palette)||!read("AVERAGING",&avg)||!read("HANN",&hann)||!read("MAX_HOLD",&hold))return false;
     read("TRACE_FLOOR",&trace_floor);read("TRACE_CEILING",&trace_ceiling);
     c.center_mhz=center;c.span_mhz=span;c.frequency_step=step;c.intensity_floor=floorv;c.intensity_ceiling=ceilv;c.trace_floor=trace_floor;c.trace_ceiling=trace_ceiling;c.waterfall_palette=palette;c.averaging=avg;c.hann_window=hann;c.max_hold=hold;
-    if(center<MARAUDER_RADIO_FREQ_MIN_MHZ||center>MARAUDER_RADIO_FREQ_MAX_MHZ||span<1||span>16||step<1||step>100||floorv>=ceilv||ceilv>255||trace_floor>=trace_ceiling||trace_ceiling>255||palette>2||avg<1||avg>8||hann>1||hold>1)return false;
+    if(center<marauder_radio_freq_min_mhz()||center>marauder_radio_freq_max_mhz()||span<1||span>marauder_radio_span_max_mhz()||step<1||step>100||floorv>=ceilv||ceilv>255||trace_floor>=trace_ceiling||trace_ceiling>255||palette>2||avg<1||avg>8||hann>1||hold>1)return false;
     settings_commit(c);return true;
 }
 
@@ -776,8 +781,8 @@ size_t s_home_selected=0,s_category_selected=0,s_capture_cursor=0,s_profile_curs
 void adjust_settings(bool persist=true) {
     auto c=settings_snapshot();
     switch(s_category_selected){
-        case 0:c.center_mhz=c.center_mhz+c.frequency_step>MARAUDER_RADIO_FREQ_MAX_MHZ?MARAUDER_RADIO_FREQ_MIN_MHZ:c.center_mhz+c.frequency_step;break;
-        case 1:c.span_mhz=c.span_mhz>=16?1:c.span_mhz*2;break;
+        case 0:c.center_mhz=c.center_mhz+c.frequency_step>marauder_radio_freq_max_mhz()?marauder_radio_freq_min_mhz():c.center_mhz+c.frequency_step;break;
+        case 1:c.span_mhz=c.span_mhz>=marauder_radio_span_max_mhz()?1:c.span_mhz*2;break;
         case 2:c.frequency_step=c.frequency_step>=100?1:c.frequency_step*10;break;
         case 3:c.intensity_floor=c.intensity_floor<120?c.intensity_floor+10:0;if(c.intensity_floor>=c.intensity_ceiling)c.intensity_floor=c.intensity_ceiling-1;break;
         case 4:c.intensity_ceiling=c.intensity_ceiling<=230?c.intensity_ceiling+10:255;if(c.intensity_ceiling<=c.intensity_floor)c.intensity_ceiling=255;break;
@@ -843,8 +848,8 @@ void handle_detail_event(bool short_press,bool long_press,const Item *items,size
         else if(long_press){if(s_category_selected==0){s_page=Page::HOME;s_detail=Detail::NONE;}else{--s_category_selected;adjust_settings();++s_category_selected;}}
         return;
     }
-    if(s_detail==Detail::SPECTRUM){if(long_press){s_looking_glass_active.store(false);s_page=Page::CATEGORY;s_detail=Detail::NONE;}else if(short_press){auto c=settings_snapshot();c.center_mhz=c.center_mhz+c.frequency_step>MARAUDER_RADIO_FREQ_MAX_MHZ?MARAUDER_RADIO_FREQ_MIN_MHZ:c.center_mhz+c.frequency_step;settings_commit(c);}return;}
-    if(s_detail==Detail::FREQ){if(long_press){s_page=Page::CATEGORY;s_detail=Detail::NONE;}else if(short_press){auto c=settings_snapshot();c.center_mhz=c.center_mhz+c.frequency_step>MARAUDER_RADIO_FREQ_MAX_MHZ?MARAUDER_RADIO_FREQ_MIN_MHZ:c.center_mhz+c.frequency_step;settings_commit(c);}return;}
+    if(s_detail==Detail::SPECTRUM){if(long_press){s_looking_glass_active.store(false);s_page=Page::CATEGORY;s_detail=Detail::NONE;}else if(short_press){auto c=settings_snapshot();c.center_mhz=c.center_mhz+c.frequency_step>marauder_radio_freq_max_mhz()?marauder_radio_freq_min_mhz():c.center_mhz+c.frequency_step;settings_commit(c);}return;}
+    if(s_detail==Detail::FREQ){if(long_press){s_page=Page::CATEGORY;s_detail=Detail::NONE;}else if(short_press){auto c=settings_snapshot();c.center_mhz=c.center_mhz+c.frequency_step>marauder_radio_freq_max_mhz()?marauder_radio_freq_min_mhz():c.center_mhz+c.frequency_step;settings_commit(c);}return;}
     if(s_detail==Detail::GAIN||s_detail==Detail::FLASH||s_detail==Detail::DEBUG||s_detail==Detail::STORAGE||s_detail==Detail::DEVICE||s_detail==Detail::DIAG){if(long_press){s_page=Page::CATEGORY;s_detail=Detail::NONE;}return;}
     if(s_detail==Detail::SCANNER){if(short_press)s_recon_active.store(!s_recon_active.load());if(long_press){s_recon_active.store(false);s_page=Page::CATEGORY;s_detail=Detail::NONE;}return;}
     if(s_detail==Detail::CAPTURE_FILES){static char names[24][64];size_t nfiles=list_capture_names(names,24);const size_t choices=nfiles+1;if(short_press){s_capture_delete_confirm=false;s_capture_cursor=(s_capture_cursor+choices+s_nav_dir)%choices;}else if(long_press){if(!nfiles||s_capture_cursor>=nfiles){s_page=Page::CATEGORY;s_detail=Detail::NONE;}else if(!s_capture_delete_confirm){s_capture_delete_confirm=true;snprintf(s_status,sizeof(s_status),"HOLD AGAIN TO DELETE");}else{char path[64],meta[72];snprintf(path,sizeof(path),"%s",names[s_capture_cursor%nfiles]);snprintf(meta,sizeof(meta),"%s.META",path);bool ok=marauder::storage_delete_file(path);marauder::storage_delete_file(meta);s_capture_delete_confirm=false;snprintf(s_status,sizeof(s_status),ok?"CAPTURE DELETED":"DELETE FAILED");s_page=Page::CATEGORY;s_detail=Detail::NONE;}}return;}
@@ -879,7 +884,7 @@ void handle_detail_event(bool short_press,bool long_press,const Item *items,size
         }
         return;
     }
-    if(s_detail==Detail::FREQ_MANAGER){if(short_press){auto c=settings_snapshot();c.center_mhz=c.center_mhz+5>MARAUDER_RADIO_FREQ_MAX_MHZ?MARAUDER_RADIO_FREQ_MIN_MHZ:c.center_mhz+5;settings_commit(c);}if(long_press){s_page=Page::CATEGORY;s_detail=Detail::NONE;}return;}
+    if(s_detail==Detail::FREQ_MANAGER){if(short_press){auto c=settings_snapshot();c.center_mhz=c.center_mhz+5>marauder_radio_freq_max_mhz()?marauder_radio_freq_min_mhz():c.center_mhz+5;settings_commit(c);}if(long_press){s_page=Page::CATEGORY;s_detail=Detail::NONE;}return;}
     (void)items;(void)n;
 }
 
@@ -889,14 +894,17 @@ void handle_detail_event(bool short_press,bool long_press,const Item *items,size
 marauder::FoxConfig s_fox{};
 bool s_fox_loaded{},s_fox_armed{},s_fox_rx_paused{};
 int s_fox_edit{-1}; // 0 = message text, 1 = callsign, -1 = not editing
-unsigned s_fox_freq_step_index{};
+unsigned s_fox_freq_step_index{1}; // index into kFoxFreqSteps, starts at 5 MHz
 size_t s_fox_cursor{};
 char s_fox_note[32]{};
+bool s_fox_multi_open{};   // MULTI channel dropdown showing
+unsigned s_fox_multi_cursor{};
+unsigned s_fox_multi_last{}; // entry the REMOVE row acts on
 constexpr size_t kFoxRows=13;
 constexpr uint16_t kFoxIntervals[]={200,500,1000,1500,2000,3000,5000,10000};
 constexpr uint16_t kFoxDurations[]={0,1,5,10,30,60,120};
 constexpr uint16_t kFoxIdEvery[]={0,60,120,300,600};
-constexpr uint16_t kFoxFreqSteps[]={5,20,100};
+constexpr uint16_t kFoxFreqSteps[]={1,5,20,100};
 constexpr char kFoxCharset[]="ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/";
 
 template<size_t N> uint16_t step_table(const uint16_t (&table)[N],uint16_t current,int dir){
@@ -907,24 +915,186 @@ template<size_t N> uint16_t step_table(const uint16_t (&table)[N],uint16_t curre
 void foxtx_enter(){
     if(!s_fox_loaded){marauder::fox_config_load(&s_fox);s_fox_loaded=true;}
     marauder::fox_files_load();
-    s_fox_cursor=12;s_fox_armed=false;s_fox_edit=-1;s_fox_note[0]=0;
+    s_fox_cursor=12;s_fox_armed=false;s_fox_edit=-1;s_fox_note[0]=0;s_fox_multi_open=false;
     {const esp_reset_reason_t rr=esp_reset_reason();if(rr==ESP_RST_PANIC||rr==ESP_RST_INT_WDT||rr==ESP_RST_TASK_WDT||rr==ESP_RST_WDT||rr==ESP_RST_BROWNOUT)snprintf(s_fox_note,sizeof(s_fox_note),"LAST RESET: %s",rr==ESP_RST_PANIC?"PANIC":rr==ESP_RST_BROWNOUT?"BROWNOUT":"WATCHDOG");}
 }
 void foxtx_release_rx(){if(s_fox_rx_paused){s_radio_paused.store(settings_snapshot().paused);s_fox_rx_paused=false;}}
 void foxtx_stop(){marauder::fox_stop();foxtx_release_rx();s_fox_armed=false;}
-void foxtx_leave(){foxtx_stop();s_fox_edit=-1;marauder::fox_config_save(s_fox);}
+void foxtx_leave(){foxtx_stop();s_fox_edit=-1;s_fox_multi_open=false;marauder::fox_config_save(s_fox);}
+void foxtx_fail_note(const char *what,esp_err_t e){
+    if(e==ESP_ERR_NO_MEM){
+        const unsigned have=std::min<unsigned>(999u,(unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)/1024));
+        const unsigned need=std::min<unsigned>(999u,(marauder::fox_stack_bytes()+1023)/1024);
+        snprintf(s_fox_note,sizeof(s_fox_note),"NO MEM NEED %uK HAVE %uK",need,have);
+        return;
+    }
+    const char *n=esp_err_to_name(e);if(!strncmp(n,"ESP_ERR_",8))n+=8;
+    snprintf(s_fox_note,sizeof(s_fox_note),"%s %.18s",what,n);
+}
 void foxtx_poll(){ // the transmitter can end by itself (duration, error)
     if(s_fox_rx_paused&&!marauder::fox_status().running){
         const auto st=marauder::fox_status();
-        snprintf(s_fox_note,sizeof(s_fox_note),st.last_err==ESP_OK?"TX ENDED":"TX ERR %.20s",esp_err_to_name(st.last_err));
+        if(st.last_err==ESP_OK)snprintf(s_fox_note,sizeof(s_fox_note),"TX ENDED");else foxtx_fail_note("TX ERR",st.last_err);
         foxtx_release_rx();s_fox_armed=false;
     }
 }
 void foxtx_apply_live(){if(marauder::fox_status().running)marauder::fox_update(s_fox);}
+
+// ---- device calls for VM1 apps (SYS opcode). Full list in APP_API.md. All values are 16-bit. ----
+char s_app_ssid[33];
+void *s_app_fh{};
+marauder::DirEntry *s_app_dir{};
+size_t s_app_dir_n{};
+uint32_t s_app_fh_size{};
+constexpr size_t kAppDirMax=16;
+// A name the app stored in its memory: one character per word, 0 terminated. "" means the SD root.
+bool app_name(const int16_t *mem,size_t n,int addr,char out[80]){
+    if(!mem||addr<0||(size_t)addr>=n)return false;
+    size_t i=0;
+    while((size_t)addr+i<n&&mem[addr+i]!=0){if(i>=78)return false;out[i]=(char)(mem[addr+i]&0xFF);++i;}
+    if((size_t)addr+i>=n)return false;   // ran off the end of memory without a terminator
+    out[i]=0;
+    if(!i){out[0]='.';out[1]=0;}
+    return true;
+}
+void app_file_close(){if(s_app_fh){marauder::storage_file_close(s_app_fh);s_app_fh=nullptr;}s_app_fh_size=0;}
+int16_t app_sys_call(uint16_t fn,int16_t a,int16_t b,int16_t c,int16_t *mem,size_t mem_n){
+    (void)c;
+    switch(fn){
+        case 30:{                                                               // open file: a = name address, b = 0 read, 1 write (truncates), 2 append
+            char path[80];app_file_close();
+            if(!app_name(mem,mem_n,a,path)||b<0||b>2)return 0;
+            s_app_fh=marauder::storage_file_open(path,b==0?"rb":b==1?"wb":"ab");
+            if(!s_app_fh)return 0;
+            s_app_fh_size=b==0?(uint32_t)marauder::storage_file_size(path):0;
+            return 1;}
+        case 31:return (int16_t)(s_app_fh_size&0xFFFF);                         // size of the open file, low 16 bits
+        case 32:return (int16_t)(s_app_fh_size>>16);                            // high 16 bits
+        case 33:{                                                               // read b bytes into mem[a..], one byte per word
+            if(!s_app_fh||a<0||b<0||(size_t)a+(size_t)b>mem_n)return -1;
+            uint8_t buf[64];int total=0;
+            while(total<b){
+                const size_t want=std::min<size_t>(sizeof(buf),(size_t)(b-total));
+                const size_t got=marauder::storage_file_read(s_app_fh,buf,want);
+                for(size_t i=0;i<got;++i)mem[a+total+(int)i]=buf[i];
+                total+=(int)got;
+                if(got<want)break;
+            }
+            return (int16_t)total;}
+        case 34:{                                                               // write b bytes from mem[a..] (low 8 bits of each word)
+            if(!s_app_fh||a<0||b<0||(size_t)a+(size_t)b>mem_n)return -1;
+            uint8_t buf[64];int total=0;
+            while(total<b){
+                const size_t n=std::min<size_t>(sizeof(buf),(size_t)(b-total));
+                for(size_t i=0;i<n;++i)buf[i]=(uint8_t)(mem[a+total+(int)i]&0xFF);
+                if(!marauder::storage_file_write(s_app_fh,buf,n))break;
+                total+=(int)n;
+            }
+            return (int16_t)total;}
+        case 35:{if(!s_app_fh)return 0;                                         // seek: a = offset low 16, b = offset high 16
+            return marauder::storage_file_seek(s_app_fh,(size_t)(uint16_t)a|((size_t)(uint16_t)b<<16))?1:0;}
+        case 36:app_file_close();return 1;
+        case 37:{                                                               // list a folder (first 16 entries); returns the count
+            char path[80];
+            if(!app_name(mem,mem_n,a,path))return -1;
+            if(!s_app_dir)s_app_dir=new (std::nothrow) marauder::DirEntry[kAppDirMax];
+            if(!s_app_dir)return -1;
+            size_t total=0;
+            s_app_dir_n=marauder::storage_dir_page(path,nullptr,false,s_app_dir,kAppDirMax,&total);
+            return (int16_t)s_app_dir_n;}
+        case 38:{                                                               // copy entry a's name to mem[b..]; returns its length
+            if(!s_app_dir||a<0||(size_t)a>=s_app_dir_n||b<0)return -1;
+            const size_t len=strnlen(s_app_dir[a].name,63);
+            if((size_t)b+len+1>mem_n)return -1;
+            for(size_t i=0;i<len;++i)mem[b+(int)i]=(uint8_t)s_app_dir[a].name[i];
+            mem[b+(int)len]=0;
+            return (int16_t)len;}
+        case 39:return (s_app_dir&&a>=0&&(size_t)a<s_app_dir_n)?(int16_t)(s_app_dir[a].is_dir?1:0):-1;   // 1 = folder
+        case 43:return (s_app_dir&&a>=0&&(size_t)a<s_app_dir_n)?(int16_t)std::min<uint32_t>(32767,s_app_dir[a].size/1024):-1; // KB
+        case 44:{char path[80];return (app_name(mem,mem_n,a,path)&&marauder::storage_file_exists(path))?1:0;}
+    }
+    switch(fn){
+        case 0:return 1;                                                       // API version
+        case 1:return (int16_t)settings_snapshot().center_mhz;                  // SDR centre MHz
+        case 2:{if(a<(int)marauder_radio_freq_min_mhz()||a>(int)marauder_radio_freq_max_mhz())return 0;
+                auto st=settings_snapshot();st.center_mhz=(uint32_t)a;settings_commit(st,false);return 1;}
+        case 3:return (int16_t)settings_snapshot().span_mhz;                    // Z span MHz
+        case 4:{if(a<1||a>(int)marauder_radio_span_max_mhz())return 0;
+                auto st=settings_snapshot();st.span_mhz=(uint16_t)a;settings_commit(st,false);return 1;}
+        case 5:case 6:case 7:{                                                  // latest SDR frame: bin a / strongest bin / its level
+            marauder::SpectrumFrame fr{};
+            if(!s_frame_queue||xQueuePeek(s_frame_queue,&fr,0)!=pdTRUE)return fn==5?0:-1;
+            if(fn==5)return (a>=0&&a<240)?(int16_t)fr.bins[a]:0;
+            int best=0;for(int i=1;i<240;++i)if(fr.bins[i]>fr.bins[best])best=i;
+            return fn==6?(int16_t)best:(int16_t)fr.bins[best];}
+        case 8:return marauder::gps_current_fix().valid?1:0;                    // GPS fix
+        case 9:return (int16_t)marauder::gps_current_fix().satellites;
+        case 10:{const auto f=marauder::gps_current_fix();return f.valid?(int16_t)std::lround(f.latitude*100.0):0;}   // degrees x 100
+        case 11:{const auto f=marauder::gps_current_fix();return f.valid?(int16_t)std::lround(f.longitude*100.0):0;}
+        case 12:{const auto f=marauder::gps_current_fix();return (f.valid&&f.has_speed)?(int16_t)std::lround(std::min(f.speed_mps*22.3694,3276.0)):0;} // mph x 10
+        case 20:{                                                               // passive Wi-Fi scan, blocks ~2 s; returns the count or -1
+            if(marauder::fox_status().running)return -1;
+            const bool was=s_radio_paused.exchange(true);
+            uint16_t n=0;const esp_err_t e=marauder_radio_wifi_scan(&n);
+            s_radio_paused.store(was);
+            return e==ESP_OK?(int16_t)n:-1;}
+        case 21:case 22:case 23:{int rssi=0,ch=0,au=0;
+            if(!marauder_radio_wifi_scan_get((unsigned)a,nullptr,&rssi,&ch,&au))return -1;
+            return fn==21?(int16_t)rssi:fn==22?(int16_t)ch:(int16_t)au;}         // RSSI dBm / channel / auth mode
+        case 40:{                                                               // fox carrier on: freq MHz, power 0..32
+            if(marauder::fox_status().running)return 0;
+            auto f=marauder::fox_config_defaults();f.mode=(uint8_t)marauder::FoxMode::STEADY;f.freq_mhz=(uint16_t)std::clamp<int>(a,(int)marauder::kFoxFreqMin,(int)marauder::kFoxFreqMax);
+            f.power=(uint8_t)std::clamp<int>(b,0,(int)marauder::kFoxPowerMax);marauder::fox_config_sanitize(f);
+            s_radio_paused.store(true);s_fox_rx_paused=true;
+            if(marauder::fox_start(f)!=ESP_OK){foxtx_release_rx();return 0;}
+            return 1;}
+        case 41:foxtx_stop();return 1;
+        case 42:{if(s_fox_rx_paused&&!marauder::fox_status().running)foxtx_release_rx();return marauder::fox_status().running?1:0;}
+        case 50:return (int16_t)std::min<size_t>(32767,heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL|MALLOC_CAP_8BIT)/1024); // KB
+        default:return -1;
+    }
+}
+const char *app_sys_text(uint16_t fn,int16_t a){
+    if(fn!=26)return nullptr;
+    if(!marauder_radio_wifi_scan_get((unsigned)a,s_app_ssid,nullptr,nullptr,nullptr))return nullptr;
+    return s_app_ssid;
+}
+void app_sys_on_stop(){foxtx_stop();marauder_radio_wifi_scan_free();app_file_close();delete[] s_app_dir;s_app_dir=nullptr;s_app_dir_n=0;}
+const marauder::AppSysApi kAppSysApi={app_sys_call,app_sys_text,app_sys_on_stop};
 void foxtx_event(marauder::InputKey key,bool confirm){
     using marauder::InputKey;
     const bool running=marauder::fox_status().running;
     s_fox_note[0]=0;
+    if(s_fox_multi_open){ // custom frequency list. Rows: entries, + ADD, STEP, - REMOVE, DONE
+        const unsigned n=s_fox.multi_count,rows=n+4;
+        const unsigned step=kFoxFreqSteps[s_fox_freq_step_index];
+        auto cycle_step=[&](int dir){const size_t cnt=sizeof(kFoxFreqSteps)/sizeof(kFoxFreqSteps[0]);s_fox_freq_step_index=(s_fox_freq_step_index+cnt+dir)%cnt;};
+        if(s_fox_multi_cursor>=rows)s_fox_multi_cursor=rows-1;
+        if(key==InputKey::UP||key==InputKey::DOWN){
+            s_fox_multi_cursor=(s_fox_multi_cursor+(key==InputKey::UP?rows-1:1))%rows;
+            if(s_fox_multi_cursor<n)s_fox_multi_last=s_fox_multi_cursor;
+        }else if(key==InputKey::LEFT||key==InputKey::RIGHT){
+            const int dir=key==InputKey::RIGHT?1:-1;
+            if(s_fox_multi_cursor<n){ // tune this entry
+                marauder::fox_multi_set(s_fox,s_fox_multi_cursor,(unsigned)std::clamp<int>((int)s_fox.multi_mhz[s_fox_multi_cursor]+dir*(int)step,(int)marauder::kFoxFreqMin,(int)marauder::kFoxFreqMax));
+                foxtx_apply_live();
+            }else if(s_fox_multi_cursor==n+1)cycle_step(dir);
+        }else if(confirm){
+            if(s_fox_multi_cursor<n){
+                if(!marauder::fox_multi_toggle(s_fox,s_fox_multi_cursor))snprintf(s_fox_note,sizeof(s_fox_note),"KEEP ONE ENABLED");
+                else foxtx_apply_live();
+            }else if(s_fox_multi_cursor==n){ // add after the last entry, one step up from it (or at the carrier)
+                const unsigned seed=n?(unsigned)std::min<int>((int)s_fox.multi_mhz[n-1]+(int)step,(int)marauder::kFoxFreqMax):s_fox.freq_mhz;
+                if(marauder::fox_multi_add(s_fox,seed)){s_fox_multi_cursor=n;s_fox_multi_last=n;foxtx_apply_live();}
+                else snprintf(s_fox_note,sizeof(s_fox_note),"LIST FULL (%u)",(unsigned)marauder::kFoxMultiMax);
+            }else if(s_fox_multi_cursor==n+1)cycle_step(1);
+            else if(s_fox_multi_cursor==n+2){
+                if(marauder::fox_multi_remove(s_fox,s_fox_multi_last)){if(s_fox_multi_last>=s_fox.multi_count)s_fox_multi_last=s_fox.multi_count-1;foxtx_apply_live();}
+                else snprintf(s_fox_note,sizeof(s_fox_note),"KEEP AT LEAST ONE");
+            }else{s_fox_multi_open=false;marauder::fox_config_save(s_fox);}
+        }
+        return;
+    }
     if(s_fox_edit>=0){
         char *field=s_fox_edit==0?s_fox.text:s_fox.call;
         size_t n=strlen(field);
@@ -940,6 +1110,7 @@ void foxtx_event(marauder::InputKey key,bool confirm){
     }
     if(key==InputKey::UP||key==InputKey::DOWN){s_fox_armed=false;s_fox_cursor=(s_fox_cursor+(key==InputKey::UP?kFoxRows-1:1))%kFoxRows;return;}
     if(confirm){
+        if(s_fox_cursor==3&&s_fox.mode==(uint8_t)marauder::FoxMode::MULTI){s_fox_multi_open=true;s_fox_multi_cursor=0;s_fox_multi_last=0;return;}
         if(s_fox_cursor==1){s_fox_freq_step_index=(s_fox_freq_step_index+1)%(sizeof(kFoxFreqSteps)/sizeof(*kFoxFreqSteps));return;}
         if(s_fox_cursor==7){if(marauder::fox_file_message_count())snprintf(s_fox_note,sizeof(s_fox_note),"MESSAGES COME FROM FILE");else s_fox_edit=0;return;}
         if(s_fox_cursor==8){if(marauder::fox_callsign_from_file())snprintf(s_fox_note,sizeof(s_fox_note),"CALLSIGN COMES FROM FILE");else s_fox_edit=1;return;}
@@ -952,8 +1123,10 @@ void foxtx_event(marauder::InputKey key,bool confirm){
             marauder::fox_config_save(s_fox);
             s_radio_paused.store(true);s_fox_rx_paused=true;
             const esp_err_t e=marauder::fox_start(s_fox);
-            if(e!=ESP_OK){foxtx_release_rx();snprintf(s_fox_note,sizeof(s_fox_note),"START ERR %.20s",esp_err_to_name(e));}
             s_fox_armed=false;
+            if(e!=ESP_OK){foxtx_release_rx();foxtx_fail_note("START ERR",e);}
+            else snprintf(s_fox_note,sizeof(s_fox_note),"TX STARTING");
+            return; // keep the result visible: do not fall through to the generic hint below
         }
         snprintf(s_fox_note,sizeof(s_fox_note),"SELECT ACTION ROW TO START");
         return;
@@ -966,7 +1139,7 @@ void foxtx_event(marauder::InputKey key,bool confirm){
         case 0:f.mode=(uint8_t)(((int)f.mode+(int)marauder::FoxMode::COUNT+dir)%(int)marauder::FoxMode::COUNT);break;
         case 1:f.freq_mhz=(uint16_t)std::clamp<int>((int)f.freq_mhz+dir*(int)kFoxFreqSteps[s_fox_freq_step_index],(int)marauder::kFoxFreqMin,(int)marauder::kFoxFreqMax);break;
         case 2:f.power=(uint8_t)std::clamp<int>((int)f.power+dir,0,(int)marauder::kFoxPowerMax);break;
-        case 3:f.hop_set=(uint8_t)(((int)f.hop_set+(int)marauder::fox_hop_set_count()+dir)%(int)marauder::fox_hop_set_count());break;
+        case 3:if(f.mode==(uint8_t)marauder::FoxMode::MULTI)return;f.hop_set=(uint8_t)(((int)f.hop_set+(int)marauder::fox_hop_set_count()+dir)%(int)marauder::fox_hop_set_count());break;
         case 4:f.interval_ms=step_table(kFoxIntervals,f.interval_ms,dir);break;
         case 5:f.duty_pct=(uint8_t)std::clamp<int>((int)f.duty_pct+dir*10,10,90);break;
         case 6:f.duration_min=step_table(kFoxDurations,f.duration_min,dir);break;
@@ -1150,13 +1323,14 @@ void draw_foxtx(bool screen_changed){
     const auto st=marauder::fox_status();
     if(screen_changed)draw_detail_frame("U/D ROW L/R CHG C OK");
     draw_header("FOX BEACON","",screen_changed);
-    const bool hop=s_fox.mode==(uint8_t)FoxMode::HOP,burst=s_fox.mode==(uint8_t)FoxMode::BURST,morse=s_fox.mode==(uint8_t)FoxMode::MORSE,steady=s_fox.mode==(uint8_t)FoxMode::STEADY;
-    const char *labels[kFoxRows]={"MODE","CARRIER","POWER","HOP SET","INTERVAL","DUTY","DURATION","MESSAGE","CALLSIGN","WPM","ID EVERY","MSG ORDER","ACTION"};
+    const bool multi=s_fox.mode==(uint8_t)FoxMode::MULTI;
+    const bool hop=s_fox.mode==(uint8_t)FoxMode::HOP||multi,burst=s_fox.mode==(uint8_t)FoxMode::BURST,morse=s_fox.mode==(uint8_t)FoxMode::MORSE,steady=s_fox.mode==(uint8_t)FoxMode::STEADY;
+    const char *labels[kFoxRows]={"MODE","CARRIER","POWER",multi?"FREQ LIST":"HOP SET","INTERVAL","DUTY","DURATION","MESSAGE","CALLSIGN","WPM","ID EVERY","MSG ORDER","ACTION"};
     char values[kFoxRows][24]{};
     snprintf(values[0],24,"%s",marauder::fox_mode_name(s_fox.mode));
     if(hop)snprintf(values[1],24,"(HOP SET)");else snprintf(values[1],24,"%u MHZ +-%u",s_fox.freq_mhz,kFoxFreqSteps[s_fox_freq_step_index]);
     snprintf(values[2],24,"%+d DBM",marauder::fox_power_dbm(s_fox.power));
-    snprintf(values[3],24,"%s",hop?marauder::fox_hop_set_name(s_fox.hop_set):"-");
+    if(multi)snprintf(values[3],24,"%u/%u ON CTR=EDIT",marauder::fox_multi_enabled_count(s_fox),(unsigned)s_fox.multi_count);else snprintf(values[3],24,"%s",hop?marauder::fox_hop_set_name(s_fox.hop_set):"-");
     if(hop)snprintf(values[4],24,"%u MS DWELL",s_fox.interval_ms);else if(burst)snprintf(values[4],24,"%u MS PERIOD",s_fox.interval_ms);else if(morse)snprintf(values[4],24,"%u MS PAUSE",s_fox.interval_ms);else snprintf(values[4],24,"-");
     if(burst)snprintf(values[5],24,"%u%% ON",s_fox.duty_pct);else snprintf(values[5],24,"-");
     if(steady||!s_fox.duration_min)snprintf(values[6],24,"UNTIL STOPPED");else snprintf(values[6],24,"%u MIN",s_fox.duration_min);
@@ -1168,6 +1342,27 @@ void draw_foxtx(bool screen_changed){
     if(morse)snprintf(values[10],24,"-");else if(s_fox.id_every_s)snprintf(values[10],24,"%u S",s_fox.id_every_s);else snprintf(values[10],24,"OFF");
     snprintf(values[11],24,"%s",morse?(s_fox.random_order?"RANDOM":"IN ORDER"):"-");
     snprintf(values[12],24,"%s",st.running?"STOP TX":s_fox_armed?"CENTER = START":"START (ARM)");
+    if(s_fox_multi_open){ // custom frequency list replaces the settings rows
+        char line[48];
+        const unsigned n=s_fox.multi_count,rows=n+4;
+        for(unsigned r=0;r<=marauder::kFoxMultiMax+3;++r){
+            char lab[16]="",val[20]="";
+            if(r>=rows){marauder::display_text(0,36+(int)r*11,"                              ",C_CYAN,C_BLACK);continue;}
+            if(r<n){snprintf(lab,sizeof(lab),"FREQ %u",r+1);snprintf(val,sizeof(val),"%u MHZ %s",(unsigned)s_fox.multi_mhz[r],(s_fox.multi_on>>r)&1u?"[X]":"[ ]");}
+            else if(r==n){snprintf(lab,sizeof(lab),"+ ADD");snprintf(val,sizeof(val),n<marauder::kFoxMultiMax?"NEW FREQUENCY":"LIST FULL");}
+            else if(r==n+1){snprintf(lab,sizeof(lab),"STEP");snprintf(val,sizeof(val),"%u MHZ",(unsigned)kFoxFreqSteps[s_fox_freq_step_index]);}
+            else if(r==n+2){snprintf(lab,sizeof(lab),"- REMOVE");snprintf(val,sizeof(val),"#%u %u MHZ",s_fox_multi_last+1,(unsigned)s_fox.multi_mhz[s_fox_multi_last<n?s_fox_multi_last:0]);}
+            else{snprintf(lab,sizeof(lab),"DONE");snprintf(val,sizeof(val),"SAVE + CLOSE");}
+            draw_value_row((int)r,lab,val,r==s_fox_multi_cursor);
+        }
+        snprintf(line,sizeof(line),"%-28.28s",s_fox_note[0]?s_fox_note:"ROTATES THE [X] FREQUENCIES");draw_line(17,line,C_AMBER);
+        snprintf(line,sizeof(line),"%u OF %u ON  HOLD %u MS    ",marauder::fox_multi_enabled_count(s_fox),(unsigned)n,(unsigned)(s_fox.interval_ms%100000u));draw_line(18,line);
+        draw_line(19,"U/D ROW  L/R TUNE BY STEP   ");
+        draw_line(20,"CENTER ON/OFF, ADD, REMOVE  ");
+        draw_line(21,"                            ");
+        draw_line(22,"                            ");
+        return;
+    }
     for(size_t i=0;i<kFoxRows;++i)draw_value_row((int)i,labels[i],values[i],i==s_fox_cursor);
     char line[48];
     if(st.running){
@@ -1177,8 +1372,13 @@ void draw_foxtx(bool screen_changed){
     }else{
         snprintf(line,sizeof(line),"%-28.28s",s_fox_note[0]?s_fox_note:(s_fox_armed?"ARMED: CENTER AGAIN":st.last_err!=ESP_OK?esp_err_to_name(st.last_err):"TX OFF - NOT ARMED"));
         draw_line(14,line,s_fox_armed?C_AMBER:C_WHITE);
-        draw_line(15,"                            ");
+        char stage[32];snprintf(stage,sizeof(stage),"%-28.28s",marauder::fox_stage());
+        draw_line(15,stage,C_CYAN);
     }
+    if(marauder::fox_stack_free_bytes()){
+        char sl[32];snprintf(sl,sizeof(sl),"TX STACK FREE %u/%u B  ",marauder::fox_stack_free_bytes()%100000u,marauder::fox_stack_bytes()%100000u);
+        draw_line(16,sl,C_CYAN);
+    }else draw_line(16,"                            ");
     draw_line(17,"SETTINGS APPLY LIVE");
     draw_line(18,"CTR ON CARRIER = STEP SIZE");
     draw_line(19,"1802-2802 MHZ; ONLY CH 1-14");
@@ -1370,7 +1570,7 @@ void ui_task(void *) {
         if(s_page==Page::HOME){count=sizeof(kHome)/sizeof(*kHome);items=kHome;if(move&&(event.key==marauder::InputKey::UP||event.key==marauder::InputKey::DOWN)){if(event.key==marauder::InputKey::UP)s_home_selected=(s_home_selected+count-1)%count;else s_home_selected=(s_home_selected+1)%count;}else if(confirm){s_category=kHomeCategories[s_home_selected];s_category_selected=s_category==Category::SETTINGS?1:0;if(s_category==Category::SETTINGS){s_detail=Detail::SETTINGS;s_page=Page::DETAIL;}else s_page=Page::CATEGORY;}}
         else if(s_page==Page::CATEGORY){items=items_for(s_category,count);if(move&&(event.key==marauder::InputKey::UP||event.key==marauder::InputKey::DOWN)){if(event.key==marauder::InputKey::UP)s_category_selected=(s_category_selected+count-1)%count;else s_category_selected=(s_category_selected+1)%count;}else if(confirm)execute_detail_action(items,count);else if(back){s_page=Page::HOME;s_category_selected=0;}}
         else if(s_page==Page::DETAIL){
-            if(back){if(is_map_detail(s_detail))marauder::map_ui_close();if(s_detail==Detail::APPRUN)marauder::app_run_stop();if(s_detail==Detail::FOXTX)foxtx_leave();if(s_detail==Detail::DSP)marauder::dsp_cfg_save_if_dirty();s_looking_glass_active.store(false);s_recon_active.store(false);s_foxhunt_active.store(false);s_rssi_detector_active.store(false);s_tx_armed=false;if(s_detail==Detail::SETTINGS)s_page=Page::HOME;else s_page=Page::CATEGORY;s_detail=Detail::NONE;}
+            if(back){if(is_map_detail(s_detail))marauder::map_ui_close();if(s_detail==Detail::APPRUN)marauder::app_run_stop();if(s_detail==Detail::FOXTX)foxtx_leave();if(s_detail==Detail::FILES)s_br.release_history();if(s_detail==Detail::DSP)marauder::dsp_cfg_save_if_dirty();s_looking_glass_active.store(false);s_recon_active.store(false);s_foxhunt_active.store(false);s_rssi_detector_active.store(false);s_tx_armed=false;if(s_detail==Detail::SETTINGS)s_page=Page::HOME;else s_page=Page::CATEGORY;s_detail=Detail::NONE;}
             else if(s_detail==Detail::GAIN&&(move||confirm)){
                 bool automatic=marauder_radio_rx_gain_is_auto();unsigned index=marauder_radio_rx_gain_index();
                 if(event.key==marauder::InputKey::RIGHT){if(event.kind==marauder::InputKind::PRESS)dc_mode_cycle();}
@@ -1399,7 +1599,22 @@ void ui_task(void *) {
                 else if(confirm)marauder::app_run_key(5);
             }
             else if(is_map_detail(s_detail)){if(marauder::map_ui_event(event,move,confirm)){marauder::map_ui_close();s_page=Page::CATEGORY;s_detail=Detail::NONE;}}
-            else if(s_detail==Detail::FILES){if(br_event(event,move,confirm)){s_page=Page::CATEGORY;s_detail=Detail::NONE;}}
+            else if(s_detail==Detail::DEBUG&&(move||confirm)){
+                if(move&&(event.key==marauder::InputKey::UP||event.key==marauder::InputKey::DOWN))s_debug_cursor^=1;
+                else if(confirm){
+                    auto c=settings_snapshot();
+                    if(s_debug_cursor==0){
+                        const bool on=!marauder_radio_tune_unlock();marauder_radio_set_tune_unlock(on);
+                        if(!on){c.center_mhz=std::clamp<uint32_t>(c.center_mhz,marauder_radio_freq_min_mhz(),marauder_radio_freq_max_mhz());settings_commit(c);}
+                        snprintf(s_status,sizeof(s_status),on?"TUNE UNLOCK ON 100-6000":"TUNE UNLOCK OFF");
+                    }else{
+                        const bool on=!marauder_radio_span_unlock();marauder_radio_set_span_unlock(on);
+                        if(!on&&c.span_mhz>marauder_radio_span_max_mhz()){c.span_mhz=(uint16_t)marauder_radio_span_max_mhz();settings_commit(c);}
+                        snprintf(s_status,sizeof(s_status),on?"Z UNLOCK ON":"Z UNLOCK OFF");
+                    }
+                }
+            }
+            else if(s_detail==Detail::FILES){if(br_event(event,move,confirm)){s_br.release_history();s_page=Page::CATEGORY;s_detail=Detail::NONE;}}
             else if(s_detail==Detail::FOXTX&&(move||confirm)){foxtx_event(event.key,confirm);}
             else if(s_detail==Detail::DSP&&(move||confirm)){dsp_event(event.key,confirm,event.kind==marauder::InputKind::REPEAT);}
             else if(s_detail==Detail::RSSI_GRAPH&&(move||confirm)){
@@ -1409,7 +1624,7 @@ void ui_task(void *) {
                     const int repeat=event.repeat_count>24?8:event.repeat_count>16?4:event.repeat_count>8?2:1;
                     const int delta=(int)c.frequency_step*repeat*(event.key==marauder::InputKey::RIGHT?1:-1);
                     const uint32_t current=s_rssi_detector_frequency.load(std::memory_order_relaxed);
-                    const uint32_t next=(uint32_t)std::clamp<int>((int)current+delta,MARAUDER_RADIO_FREQ_MIN_MHZ,MARAUDER_RADIO_FREQ_MAX_MHZ);
+                    const uint32_t next=(uint32_t)std::clamp<int>((int)current+delta,marauder_radio_freq_min_mhz(),marauder_radio_freq_max_mhz());
                     s_rssi_detector_frequency.store(next,std::memory_order_relaxed);
                     s_rssi_history_count=s_rssi_history_head=0;
                     memset(s_rssi_history,0,sizeof(s_rssi_history));
@@ -1426,7 +1641,7 @@ void ui_task(void *) {
                     const int repeat=event.repeat_count>24?8:event.repeat_count>16?4:event.repeat_count>8?2:1;
                     const int delta=(int)steps[s_foxhunt_step_index]*repeat*(event.key==marauder::InputKey::RIGHT?1:-1);
                     const uint32_t current=s_foxhunt_frequency.load(std::memory_order_relaxed);
-                    const uint32_t next=(uint32_t)std::clamp<int>((int)current+delta,MARAUDER_RADIO_FREQ_MIN_MHZ,MARAUDER_RADIO_FREQ_MAX_MHZ);
+                    const uint32_t next=(uint32_t)std::clamp<int>((int)current+delta,marauder_radio_freq_min_mhz(),marauder_radio_freq_max_mhz());
                     s_foxhunt_frequency.store(next,std::memory_order_relaxed);
                     s_foxhunt_level=s_foxhunt_peak_level=0;
                     s_foxhunt_peak_offset_khz=0;
@@ -1455,8 +1670,8 @@ void ui_task(void *) {
                             const int old_min=(int)s_glass_min_frequency.load(std::memory_order_relaxed);
                             const int old_max=(int)s_glass_max_frequency.load(std::memory_order_relaxed);
                             const int width=old_max-old_min;
-                            const int upper=s_glass_range_locked?(int)MARAUDER_RADIO_FREQ_MAX_MHZ-width:old_max;
-                            const int next=std::clamp(old_min+direction*step,(int)MARAUDER_RADIO_FREQ_MIN_MHZ,upper);
+                            const int upper=s_glass_range_locked?(int)marauder_radio_freq_max_mhz()-width:old_max;
+                            const int next=std::clamp(old_min+direction*step,(int)marauder_radio_freq_min_mhz(),upper);
                             if(s_glass_range_locked){
                                 const uint32_t next_max=(uint32_t)(next+width);
                                 if(next>old_min){
@@ -1474,8 +1689,8 @@ void ui_task(void *) {
                             const int old_min=(int)s_glass_min_frequency.load(std::memory_order_relaxed);
                             const int old_max=(int)s_glass_max_frequency.load(std::memory_order_relaxed);
                             const int width=old_max-old_min;
-                            const int lower=s_glass_range_locked?(int)MARAUDER_RADIO_FREQ_MIN_MHZ+width:old_min;
-                            const int next=std::clamp(old_max+direction*step,lower,(int)MARAUDER_RADIO_FREQ_MAX_MHZ);
+                            const int lower=s_glass_range_locked?(int)marauder_radio_freq_min_mhz()+width:old_min;
+                            const int next=std::clamp(old_max+direction*step,lower,(int)marauder_radio_freq_max_mhz());
                             if(s_glass_range_locked){
                                 const uint32_t next_min=(uint32_t)(next-width);
                                 if(next>old_max){
@@ -1496,9 +1711,10 @@ void ui_task(void *) {
                             break;
                         }
                         case 3:{
-                            static constexpr uint16_t spans[]={1,2,4,8,16};
-                            size_t current=0;while(current+1<sizeof(spans)/sizeof(spans[0])&&spans[current]!=c.span_mhz)++current;
-                            current=(current+(direction>0?1:sizeof(spans)/sizeof(spans[0])-1))%(sizeof(spans)/sizeof(spans[0]));
+                            static constexpr uint16_t spans[]={1,2,4,8,16,32,64};
+                            const size_t span_count=marauder_radio_span_unlock()?7:5;
+                            size_t current=0;while(current+1<span_count&&spans[current]!=c.span_mhz)++current;
+                            current=(current+(direction>0?1:span_count-1))%span_count;
                             c.span_mhz=spans[current];settings_commit(c,false);
                             break;
                         }
@@ -1529,13 +1745,13 @@ void ui_task(void *) {
                 }
             }
             else if(s_detail==Detail::SPECTRUM&&(move||confirm)){
-                auto c=settings_snapshot();if(event.key==marauder::InputKey::LEFT||event.key==marauder::InputKey::RIGHT){int speed=event.repeat_count>24?8:event.repeat_count>16?4:event.repeat_count>8?2:1;int delta=(int)c.frequency_step*speed*(event.key==marauder::InputKey::RIGHT?1:-1);c.center_mhz=(uint32_t)std::clamp<int>((int)c.center_mhz+delta,MARAUDER_RADIO_FREQ_MIN_MHZ,MARAUDER_RADIO_FREQ_MAX_MHZ);settings_commit(c,false);}
-                else if(event.key==marauder::InputKey::UP||event.key==marauder::InputKey::DOWN){c.span_mhz=event.key==marauder::InputKey::UP?(c.span_mhz<=1?16:c.span_mhz/2):(c.span_mhz>=16?1:c.span_mhz*2);settings_commit(c,false);}
+                auto c=settings_snapshot();if(event.key==marauder::InputKey::LEFT||event.key==marauder::InputKey::RIGHT){int speed=event.repeat_count>24?8:event.repeat_count>16?4:event.repeat_count>8?2:1;int delta=(int)c.frequency_step*speed*(event.key==marauder::InputKey::RIGHT?1:-1);c.center_mhz=(uint32_t)std::clamp<int>((int)c.center_mhz+delta,marauder_radio_freq_min_mhz(),marauder_radio_freq_max_mhz());settings_commit(c,false);}
+                else if(event.key==marauder::InputKey::UP||event.key==marauder::InputKey::DOWN){c.span_mhz=event.key==marauder::InputKey::UP?(c.span_mhz<=1?marauder_radio_span_max_mhz():c.span_mhz/2):(c.span_mhz>=marauder_radio_span_max_mhz()?1:c.span_mhz*2);settings_commit(c,false);}
                 else if(confirm&&s_detail==Detail::SPECTRUM){s_radio_paused.store(!s_radio_paused.load());c.paused=s_radio_paused.load();settings_commit(c);}
             }
             else if((s_detail==Detail::SPECTRUM||s_detail==Detail::FREQ)&&(move||confirm)){
-                auto c=settings_snapshot();if(event.key==marauder::InputKey::LEFT||event.key==marauder::InputKey::RIGHT){int speed=event.repeat_count>24?8:event.repeat_count>16?4:event.repeat_count>8?2:1;int delta=(int)c.frequency_step*speed*(event.key==marauder::InputKey::RIGHT?1:-1);c.center_mhz=(uint32_t)std::clamp<int>((int)c.center_mhz+delta,MARAUDER_RADIO_FREQ_MIN_MHZ,MARAUDER_RADIO_FREQ_MAX_MHZ);settings_commit(c,false);}
-                else if(event.key==marauder::InputKey::UP||event.key==marauder::InputKey::DOWN){c.span_mhz=event.key==marauder::InputKey::UP?(c.span_mhz<=1?16:c.span_mhz/2):(c.span_mhz>=16?1:c.span_mhz*2);settings_commit(c,false);}
+                auto c=settings_snapshot();if(event.key==marauder::InputKey::LEFT||event.key==marauder::InputKey::RIGHT){int speed=event.repeat_count>24?8:event.repeat_count>16?4:event.repeat_count>8?2:1;int delta=(int)c.frequency_step*speed*(event.key==marauder::InputKey::RIGHT?1:-1);c.center_mhz=(uint32_t)std::clamp<int>((int)c.center_mhz+delta,marauder_radio_freq_min_mhz(),marauder_radio_freq_max_mhz());settings_commit(c,false);}
+                else if(event.key==marauder::InputKey::UP||event.key==marauder::InputKey::DOWN){c.span_mhz=event.key==marauder::InputKey::UP?(c.span_mhz<=1?marauder_radio_span_max_mhz():c.span_mhz/2):(c.span_mhz>=marauder_radio_span_max_mhz()?1:c.span_mhz*2);settings_commit(c,false);}
                 else if(confirm&&s_detail==Detail::SPECTRUM){s_radio_paused.store(!s_radio_paused.load());c.paused=s_radio_paused.load();settings_commit(c);}
             }
             else if((s_detail==Detail::SPECTRUM||s_detail==Detail::FREQ)&&event.kind==marauder::InputKind::SHORT_RELEASE){auto save=settings_snapshot();marauder::settings_save(save);}
@@ -1802,6 +2018,13 @@ void ui_task(void *) {
                     const auto gps_diag=marauder::gps_current_fix();
                     snprintf(line,sizeof(line),"GPS %s SAT %u AGE %lus",gps_diag.valid?"FIX":"NO FIX",(unsigned)gps_diag.satellites,(unsigned long)(gps_diag.last_sentence_us?(esp_timer_get_time()-gps_diag.last_sentence_us)/1000000:999));draw_line(16,line);
                     snprintf(line,sizeof(line),"NMEA OK %lu BAD %lu",(unsigned long)gps_diag.valid_sentences,(unsigned long)gps_diag.invalid_sentences);draw_line(17,line);
+                    if(s_detail==Detail::DEBUG){
+                        draw_line(18,"EXPERIMENTAL (NOT SAVED)",C_AMBER);
+                        snprintf(line,sizeof(line),"%c[%c] TUNE 100-6000 MHZ",s_debug_cursor==0?'>':' ',marauder_radio_tune_unlock()?'X':' ');draw_line(19,line,marauder_radio_tune_unlock()?C_RED:C_WHITE);
+                        snprintf(line,sizeof(line),"%c[%c] Z UNLOCK UP TO %u",s_debug_cursor==1?'>':' ',marauder_radio_span_unlock()?'X':' ',(unsigned)MARAUDER_SPAN_UNLOCK_MAX_MHZ);draw_line(20,line,marauder_radio_span_unlock()?C_RED:C_WHITE);
+                        snprintf(line,sizeof(line),"RANGE %lu-%lu  Z MAX %lu",(unsigned long)marauder_radio_freq_min_mhz(),(unsigned long)marauder_radio_freq_max_mhz(),(unsigned long)marauder_radio_span_max_mhz());draw_line(21,line,C_CYAN);
+                        draw_line(22,"UP/DN SELECT CENTER TOGGLE");
+                    }
                     break;
                 }
                 case Detail::STORAGE:{
@@ -1855,7 +2078,7 @@ extern "C" void app_main(void) {
     esp_err_t sd=storage_init();if(sd!=ESP_OK)ESP_LOGW(kTag,"SD unavailable: %s",esp_err_to_name(sd));
     ESP_ERROR_CHECK(display_init());ESP_ERROR_CHECK(gps_init());ESP_ERROR_CHECK(marauder_radio_init());battery_init();thermal_init();marauder::dsp_cfg_load();gps_ui_preferences();dc_mode_load();
     AppSettings cfg{};ESP_ERROR_CHECK(settings_load(&cfg));portENTER_CRITICAL(&s_state_mux);s_settings=cfg;portEXIT_CRITICAL(&s_state_mux);
-    s_radio_paused.store(cfg.paused);spectrum_filter_load();s_frame_queue=xQueueCreateStatic(1,sizeof(SpectrumFrame),s_frame_queue_storage,&s_frame_queue_control);configASSERT(s_frame_queue);
+    marauder::app_run_set_sys(&kAppSysApi);s_radio_paused.store(cfg.paused);spectrum_filter_load();s_frame_queue=xQueueCreateStatic(1,sizeof(SpectrumFrame),s_frame_queue_storage,&s_frame_queue_control);configASSERT(s_frame_queue);
     BaseType_t a=xTaskCreatePinnedToCore(gps_task_entry,"gps",3072,nullptr,3,&s_gps_task_handle,1);
     BaseType_t b=xTaskCreatePinnedToCore(radio_task,"radio_dsp",8192,nullptr,8,&s_radio_task_handle,0);
     BaseType_t c=xTaskCreatePinnedToCore(ui_task,"display_ui",12288,nullptr,5,&s_ui_task_handle,1);

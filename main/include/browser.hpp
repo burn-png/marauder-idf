@@ -27,6 +27,8 @@ public:
     void page(int direction);                    // +1 / -1: one screenful
     bool enter();                                // selected entry is a folder: descend
     bool up();                                   // parent folder; the folder we left stays selected. false at the root
+                                                 // Going back to a folder entered from here is instant: the last two levels are kept in RAM.
+    void release_history();                      // free the cached levels (call when leaving the browser)
     const char *dir() const { return dir_; }
     bool at_root() const { return dir_[0] == '.' && !dir_[1]; }
     size_t count() const { return count_; }
@@ -39,6 +41,13 @@ public:
     // neighbouring files of a kind, for next/previous image: returns false when there is none (wraps through the folder)
     bool step_kind(FileKind kind, int direction, DirEntry *out);
 private:
+    struct Snap { char dir[80]; DirEntry win[kRows]; size_t count, cursor, start, total; };
+    static constexpr size_t kHist = 2;           // levels kept for instant Back
+    Snap *hist_[kHist] = {};
+    size_t hist_n_ = 0;
+    bool keep_hist_ = false;
+    void push_snapshot();
+    bool restore_snapshot(const char *parent);
     bool load(const DirEntry *anchor, bool before);
     PageFn fn_ = nullptr;
     char dir_[80] = ".";

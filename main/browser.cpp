@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
+#include <new>
 
 namespace marauder {
 namespace {
@@ -68,7 +69,35 @@ bool BrowserModel::load(const DirEntry *anchor, bool before) {
     count_ = n; ++rev_;
     return true;
 }
+void BrowserModel::release_history() {
+    for (size_t i = 0; i < kHist; ++i) { delete hist_[i]; hist_[i] = nullptr; }
+    hist_n_ = 0;
+}
+void BrowserModel::push_snapshot() {
+    Snap *s = new (std::nothrow) Snap();             // no memory: Back simply reads the card as before
+    if (!s) return;
+    snprintf(s->dir, sizeof(s->dir), "%s", dir_);
+    memcpy(s->win, win_, sizeof(win_));
+    s->count = count_; s->cursor = cursor_; s->start = start_; s->total = total_;
+    if (hist_n_ == kHist) {                          // full: drop the oldest level
+        delete hist_[0];
+        for (size_t i = 1; i < kHist; ++i) hist_[i - 1] = hist_[i];
+        hist_[--hist_n_] = nullptr;
+    }
+    hist_[hist_n_++] = s;
+}
+bool BrowserModel::restore_snapshot(const char *parent) {
+    if (!hist_n_ || strcmp(hist_[hist_n_ - 1]->dir, parent)) return false;
+    Snap *s = hist_[--hist_n_]; hist_[hist_n_] = nullptr;
+    snprintf(dir_, sizeof(dir_), "%s", s->dir);
+    memcpy(win_, s->win, sizeof(win_));
+    count_ = s->count; cursor_ = s->cursor; start_ = s->start; total_ = s->total;
+    ++rev_;
+    delete s;
+    return true;
+}
 bool BrowserModel::open_dir(const char *dir) {
+    if (!keep_hist_) release_history();               // a fresh jump (not a descend) invalidates the cache
     char keep[80]; memcpy(keep, dir_, sizeof(keep));
     snprintf(dir_, sizeof(dir_), "%s", dir);
     size_t total = 0; DirEntry probe[1];
@@ -80,6 +109,7 @@ bool BrowserModel::open_dir(const char *dir) {
     return true;
 }
 bool BrowserModel::reload() {
+    release_history();                                // the folder changed under us: cached parents may be stale too
     char name[64] = {0}; bool isdir = false;
     if (count_) { snprintf(name, sizeof(name), "%s", win_[cursor_].name); isdir = win_[cursor_].is_dir; }
     const size_t oldpos = start_ + cursor_;
@@ -129,7 +159,13 @@ bool BrowserModel::enter() {
     if (!count_ || !win_[cursor_].is_dir) return false;
     char next[80];
     if (!browser_join(dir_, win_[cursor_].name, next, sizeof(next))) return false;
-    return open_dir(next);
+    push_snapshot();
+    const size_t depth = hist_n_;
+    keep_hist_ = true;
+    const bool ok = open_dir(next);
+    keep_hist_ = false;
+    if (!ok && hist_n_ == depth && hist_n_) { delete hist_[--hist_n_]; hist_[hist_n_] = nullptr; }   // could not enter: undo
+    return ok;
 }
 bool BrowserModel::up() {
     if (at_root()) return false;
@@ -137,6 +173,7 @@ bool BrowserModel::up() {
     char *slash = strrchr(parent, '/');
     char left[80];
     if (slash) { snprintf(left, sizeof(left), "%s", slash + 1); *slash = 0; } else { snprintf(left, sizeof(left), "%s", parent); snprintf(parent, sizeof(parent), "."); }
+    if (restore_snapshot(parent)) return true;       // instant: no card access
     if (!open_dir(parent)) return false;
     // select the folder we just left
     for (size_t guard = 0; guard < 100000; ++guard) {

@@ -3,7 +3,7 @@
    '@xs' loads xs[<index on stack>]."""
 import struct
 OPS = dict(HALT=0, DUP=3, DROP=4, SWAP=5, OVER=6, ADD=10, SUB=11, MUL=12, DIV=13, MOD=14, AND=15, OR=16, XOR=17, NEG=18, NOT=19,
-           LT=20, GT=21, EQ=22, NE=23, LE=24, GE=25, LOAD=40, STORE=41, RND=50, KEY=51, FRAME=52, CLS=53, RECT=54, NUM=55)
+           LT=20, GT=21, EQ=22, NE=23, LE=24, GE=25, LOAD=40, STORE=41, RND=50, KEY=51, FRAME=52, CLS=53, RECT=54, NUM=55, SYS=60, STR=61)
 SYM = {'+': 'ADD', '-': 'SUB', '*': 'MUL', '/': 'DIV', '%': 'MOD', '&': 'AND', '|': 'OR', '^': 'XOR', '<': 'LT', '>': 'GT',
        '==': 'EQ', '!=': 'NE', '<=': 'LE', '>=': 'GE', 'neg': 'NEG', 'not': 'NOT', 'dup': 'DUP', 'drop': 'DROP', 'swap': 'SWAP',
        'over': 'OVER', 'key': 'KEY', 'rnd': 'RND'}
@@ -35,6 +35,12 @@ class Asm:
     def rect(s, x, y, w, h, color):                                    # each arg: int or list of tokens
         for a in (x, y, w, h, color): s.e(*(a if isinstance(a, (list, tuple)) else [a]))
         s.op('RECT')
+    def str(s, name, msg):                                             # store msg (one char per word, 0 terminated) at variable `name`
+        b = msg.encode('ascii'); assert len(b) <= 80 and s.vars[name][1] >= len(b) + 1
+        s.push(s.vars[name][0]); s.b += bytes([61, len(b)]) + b
+    def sys(s, fn, a=0, b=0, c=0):                                     # device call; leaves its result on the stack
+        for arg in (a, b, c): s.e(*(arg if isinstance(arg, (list, tuple)) else [arg]))
+        s.push(fn); s.op('SYS')
     def finish(s):
         for pos, name in s.fix: s.b[pos:pos + 2] = struct.pack('<H', s.labels[name])
         assert len(s.b) <= 4096, len(s.b)

@@ -9,7 +9,9 @@ using namespace marauder;
 struct Ent { std::string name; bool dir; };
 static std::vector<std::pair<std::string, std::vector<Ent>>> g_fs;
 static std::vector<Ent> *find(const char *d) { for (auto &p : g_fs) if (p.first == d) return &p.second; return nullptr; }
+static int g_page_calls = 0;
 static size_t page(const char *dir, const DirEntry *anchor, bool before, DirEntry *out, size_t cap, size_t *total) {
+    ++g_page_calls;
     auto *v = find(dir); if (!v) { *total = 0; return 0; }
     DirEntry a; if (anchor) { a = *anchor; anchor = &a; }
     size_t n = 0;
@@ -69,5 +71,22 @@ int main() {
     char n[32]; browser_fit_name("IMG_20240101_123456.jpg", 16, n, sizeof n); assert(strlen(n) == 16 && !strcmp(n + 12, ".jpg")); printf("fit: %s\n", n);
     browser_fit_name("short.txt", 16, n, sizeof n); assert(!strcmp(n, "short.txt"));
     char j[80]; assert(browser_join(".", "a.jpg", j, sizeof j) && !strcmp(j, "a.jpg")); assert(browser_join("A/B", "c", j, sizeof j) && !strcmp(j, "A/B/c"));
+    // history cache: descending then going Back must not touch the card, and must restore the selection
+    {
+        BrowserModel h; h.init(page);
+        assert(h.open_dir("."));
+        while (!(h.selected()->is_dir && !strcmp(h.selected()->name, "maps"))) h.move(1);
+        const size_t pos_before = h.position();
+        assert(h.enter()); assert(!strcmp(h.dir(), "maps"));
+        while (!(h.selected()->is_dir && !strcmp(h.selected()->name, "cache"))) h.move(1);
+        assert(h.enter()); assert(!strcmp(h.dir(), "maps/cache"));
+        const int calls = g_page_calls;
+        assert(h.up()); assert(!strcmp(h.dir(), "maps")); assert(!strcmp(h.selected()->name, "cache"));
+        assert(h.up()); assert(!strcmp(h.dir(), ".")); assert(h.position() == pos_before); assert(!strcmp(h.selected()->name, "maps"));
+        assert(g_page_calls == calls);                     // both Backs were served from memory
+        assert(h.enter()); h.release_history();
+        const int c2 = g_page_calls; assert(h.up()); assert(g_page_calls > c2);   // released: reads the card again
+        puts("history cache ok");
+    }
     puts("ALL PASS");
 }

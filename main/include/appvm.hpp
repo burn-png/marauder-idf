@@ -1,7 +1,8 @@
 #pragma once
 // VM1: a tiny sandboxed bytecode machine for SD-card apps (APPS/*.APP with RUNTIME=VM1 and a CODE= hex line).
-// An app can only compute, read the joystick, wait, and draw rectangles / text / numbers inside a 240x256 window.
-// It cannot touch memory outside its own 1280-word array, the SD card, GPIO, the radio or the network.
+// An app can compute, read the joystick, wait, and draw rectangles / text / numbers inside a 240x256 window.
+// It cannot touch memory outside its own 1280-word array, the SD card or GPIO. The radio, GPS, Wi-Fi scan and fox
+// tone are reachable only through the SYS opcode, which calls the host's table (see APP_API.md).
 // Hard limits: code <= 4096 bytes, 64-entry stack, bounded step budget per call, every access bounds-checked.
 #include <stddef.h>
 #include <stdint.h>
@@ -17,7 +18,7 @@ enum Op : uint8_t {
     LT = 20, GT = 21, EQ = 22, NE = 23, LE = 24, GE = 25,
     JMP = 30, JZ = 31, JNZ = 32,
     LOAD = 40, STORE = 41,
-    RND = 50, KEY = 51, FRAME = 52, CLS = 53, RECT = 54, NUM = 55, TEXT = 56,
+    RND = 50, KEY = 51, FRAME = 52, CLS = 53, RECT = 54, NUM = 55, TEXT = 56, SYS = 60, STR = 61,
 };
 enum Key : int16_t { K_NONE = 0, K_UP = 1, K_DOWN = 2, K_LEFT = 3, K_RIGHT = 4, K_CENTER = 5 };
 enum class State : uint8_t { EMPTY, RUNNING, WAITING, HALTED, FAULT };
@@ -29,6 +30,9 @@ struct Host {
     void (*text)(void *ctx, int x, int y, const char *s, uint8_t color) = nullptr;
     void (*clear)(void *ctx) = nullptr;
     uint32_t (*random)(void *ctx) = nullptr;
+    // SYS opcode; null = faults. `mem` is the app's own word memory so calls can move data in and out; the host must
+    // bounds-check every range it touches against mem_words.
+    int16_t (*sys)(void *ctx, uint16_t fn, int16_t a, int16_t b, int16_t c, int16_t *mem, size_t mem_words) = nullptr;
     void *ctx = nullptr;
 };
 
